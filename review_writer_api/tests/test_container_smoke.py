@@ -48,7 +48,7 @@ class ContainerConfigurationTests(unittest.TestCase):
             3,
             source.count(
                 "REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY: "
-                "${REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY:-8}"
+                "${REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY:-4}"
             ),
         )
         gateway_block = source.split("  model-gateway:", 1)[1].split(

@@ -30,8 +30,9 @@ REVIEW_ROOT = _BOOTSTRAP_ROOT
 if str(REVIEW_ROOT) not in sys.path:
     sys.path.insert(0, str(REVIEW_ROOT))
 
+from review_writer_core.atomic_io import atomic_write_json as write_json  # noqa: E402
 from review_writer_core.metadata_tags import (  # noqa: E402
-    STRUCTURED_TAG_KEYS,
+    STRUCTURED_TAG_KEYS,  # noqa: F401 - retained for standalone metadata callers
     neutral_structured_tag_values,
 )
 from review_writer_core.abstract_extraction import extract_abstract  # noqa: E402
@@ -100,13 +101,6 @@ def scored(value: Any, source: str, confidence: float) -> dict[str, Any]:
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
 
 
 def iter_jobs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -297,27 +291,6 @@ def extract_authors(blocks: list[dict[str, Any]], title_value: str) -> dict[str,
             authors.append(part)
     authors = dedupe(authors)
     return scored(authors, "content_list_after_title", 0.74 if authors else 0.0)
-
-
-def extract_keywords(blocks: list[dict[str, Any]], md: str) -> dict[str, Any]:
-    texts = block_texts(blocks, max_page=1)
-    keywords: list[str] = []
-    for i, text in enumerate(texts[:60]):
-        compact = re.sub(r"\s+", "", text).lower()
-        if compact in {"keywords:", "keywords"}:
-            for nxt in texts[i + 1 : i + 10]:
-                if looks_like_section_heading(nxt) or re.search(r"\babstract\b", nxt, re.I):
-                    break
-                if 2 <= len(nxt) <= 90:
-                    keywords.append(nxt.strip(" ;,."))
-            break
-    if not keywords:
-        m = re.search(r"Keywords:\s*(.+?)(?:\n\s*#|\n\s*A\s*B\s*S\s*T\s*R\s*A\s*C\s*T)", md, re.I | re.S)
-        if m:
-            raw = m.group(1)
-            keywords = [clean_text(x).strip(" ;,.") for x in re.split(r"\n|;|,", raw) if clean_text(x)]
-    keywords = [kw for kw in dedupe(keywords) if 2 <= len(kw) <= 80]
-    return scored(keywords[:12], "content_list_keywords_region", 0.86 if keywords else 0.0)
 
 
 def extract_doi(md: str) -> dict[str, Any]:
@@ -585,8 +558,6 @@ def has_value(value: Any) -> bool:
     return True
 
 
-
-
 def existing_metadata(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -625,7 +596,6 @@ def build_metadata(
     authors = local_fields.get("authors") or scored(
         None, "awaiting_bounded_document_resolution", 0.0
     )
-    keywords = extract_keywords(blocks, md)
     abstract = extract_abstract(blocks, markdown_head(md_path, 200_000), pdf_first_page_text)
     publication = extract_publication_metadata(md, job.get("pdf_name") or slug)
     year = local_fields.get("year") or publication["year"]

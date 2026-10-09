@@ -17,7 +17,31 @@ export function manuscriptText(node: Node): string {
   if (node.tagName === "A") return `[${value}](${node.getAttribute("href")})`;
   if (node.tagName === "P") return value + "\n";
   if (node.tagName === "DIV" && !node.classList.contains("draft-inline-text")) return "\n" + value + "\n";
+  // Markdown tables must round-trip as tables: reading their cells as plain
+  // text would collapse the block and lose the row/column structure.
+  if (node.tagName === "TABLE") return tableMarkdown(node);
+  if (node.tagName === "CAPTION" || node.tagName === "THEAD" || node.tagName === "TBODY" || node.tagName === "TFOOT") return value;
   return value;
+}
+
+/** Serialize a rendered table back to the GFM block the manuscript stores. */
+export function tableMarkdown(table: HTMLElement): string {
+  const rows = Array.from(table.querySelectorAll("tr"));
+  if (!rows.length) return "";
+  const cellsOf = (row: Element) =>
+    Array.from(row.querySelectorAll("th,td")).map(cell =>
+      manuscriptText(cell).replace(/\s+/g, " ").replace(/\|/g, "\\|").trim());
+  const matrix = rows.map(cellsOf);
+  const columns = Math.max(...matrix.map(cells => cells.length));
+  const pad = (cells: string[]) => [...cells, ...Array(columns - cells.length).fill("")];
+  const head = matrix[0];
+  const body = matrix.slice(1);
+  const lines = [
+    `| ${pad(head).join(" | ")} |`,
+    `| ${pad([]).map(() => "---").join(" | ")} |`,
+    ...body.map(cells => `| ${pad(cells).join(" | ")} |`),
+  ];
+  return lines.join("\n");
 }
 
 export function InlineManuscriptText({ value, label, disabled, onChange, canonical = value }: {

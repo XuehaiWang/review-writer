@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { apiRequest, jsonBody } from "../../api/client";
+import { ApiError, apiRequest, jsonBody } from "../../api/client";
 import { isMetadataObject, metadataFieldValue, metadataTextForEditing, type MetadataRecord } from "../library/metadata/metadataEditorModel";
 import { useUiText } from "../../i18n/useUiText";
 import { FinalFigureReview } from "./FinalFigureReview";
@@ -62,6 +62,17 @@ export function FinalIssuesPanel({ projectId, issues, busy, onSync }: {
   </section>;
 }
 
+type BibliographySnapshot = { metadata: MetadataRecord; metadata_artifact_id: string };
+function bibliographyValues(metadata: MetadataRecord): Record<string, string> {
+  return Object.fromEntries(fields.map(([key]) => {
+    const value = metadataFieldValue(metadata, key)
+      ?? metadataFieldValue(metadata, key === "pages" ? "page" : key === "issue" ? "number" : key);
+    return [key, Array.isArray(value) ? value.map(item => isMetadataObject(item)
+      ? metadataTextForEditing(item.name || [item.given, item.family].filter(Boolean).join(" "))
+      : metadataTextForEditing(item)).join("\n") : metadataTextForEditing(value)];
+  }));
+}
+
 function BibliographyCorrection({ issue, projectId, busy, onSync, close }: {
   issue: FinalIssue; projectId: string; busy: boolean; onSync: () => Promise<unknown>; close: () => void;
 }) {
@@ -72,24 +83,45 @@ function BibliographyCorrection({ issue, projectId, busy, onSync, close }: {
   const [confirmed, setConfirmed] = useState(false);
   const [location, setLocation] = useState("");
   const [saved, setSaved] = useState(false);
+  const [baseline, setBaseline] = useState<{ version: string; values: Record<string, string> } | null>(null);
+  const [conflicts, setConflicts] = useState<Record<string, string>>({});
   const url = `/api/v1/projects/${encodeURIComponent(projectId)}/final/references/${encodeURIComponent(issue.target_id)}/bibliography`;
-  const query = useQuery({ queryKey: ["final-reference", projectId, issue.target_id], queryFn: () => apiRequest<{ metadata: MetadataRecord; metadata_artifact_id: string }>(url), refetchOnWindowFocus: false });
+  const queryKey = ["final-reference", projectId, issue.target_id];
+  const query = useQuery({ queryKey, queryFn: () => apiRequest<BibliographySnapshot>(url), refetchOnMount: "always", refetchOnWindowFocus: false });
   useEffect(() => { dialog.current?.showModal(); }, []);
-  useEffect(() => { if (query.data) setValues(Object.fromEntries(fields.map(([key]) => {
-    const value = metadataFieldValue(query.data.metadata, key)
-      ?? metadataFieldValue(query.data.metadata, key === "pages" ? "page" : key === "issue" ? "number" : key);
-    return [key, Array.isArray(value) ? value.map(item => isMetadataObject(item)
-      ? metadataTextForEditing(item.name || [item.given, item.family].filter(Boolean).join(" "))
-      : metadataTextForEditing(item)).join("\n") : metadataTextForEditing(value)];
-  }))); }, [query.data]);
+  useEffect(() => {
+    if (!baseline && query.data && !query.isFetching && !query.isError) {
+      const initial = bibliographyValues(query.data.metadata);
+      setValues(initial);
+      setBaseline({ version: query.data.metadata_artifact_id, values: initial });
+    }
+  }, [baseline, query.data, query.isFetching, query.isError]);
   const sync = useMutation({ mutationFn: onSync });
   const save = useMutation({ mutationFn: async () => {
-    await apiRequest(url, { method: "PUT", ...jsonBody({ metadata_artifact_id: query.data!.metadata_artifact_id,
+    await apiRequest(url, { method: "PUT", ...jsonBody({ metadata_artifact_id: baseline!.version,
       fields: Object.fromEntries(fields.map(([key]) => [key, key === "authors" ? (values[key] || "").split(/\r?\n/).map(v => v.trim()).filter(Boolean) : (values[key] || "").trim()])), source_location: location }) });
     setSaved(true);
-    await Promise.all([client.invalidateQueries({ queryKey: ["final", projectId] }), client.invalidateQueries({ queryKey: ["library"] })]);
+    await Promise.all([client.invalidateQueries({ queryKey, refetchType: "none" }), client.invalidateQueries({ queryKey: ["final", projectId] }), client.invalidateQueries({ queryKey: ["library"] })]);
   }, onSuccess: () => sync.mutate() });
-  const pending = save.isPending || sync.isPending;
+  const reload = useMutation({ mutationFn: () => apiRequest<BibliographySnapshot>(url), onSuccess: latest => {
+    const fresh = bibliographyValues(latest.metadata);
+    const collisions: Record<string, string> = {};
+    const merged = { ...fresh };
+    for (const [key] of fields) {
+      if (baseline && values[key] !== baseline.values[key]) {
+        merged[key] = values[key];
+        if (fresh[key] !== baseline.values[key] && fresh[key] !== values[key]) collisions[key] = fresh[key];
+      }
+    }
+    setValues(merged);
+    setBaseline({ version: latest.metadata_artifact_id, values: fresh });
+    setConflicts(collisions);
+    setConfirmed(false);
+    client.setQueryData(queryKey, latest);
+    save.reset();
+  } });
+  const versionConflict = save.error instanceof ApiError && save.error.status === 409;
+  const pending = save.isPending || sync.isPending || reload.isPending;
   return <dialog ref={dialog} className="final-bibliography-dialog" aria-label={text("补全书目信息", "Correct bibliography")} onCancel={event => { event.preventDefault(); if (!pending) close(); }}>
     <header><h2>{text("补全书目信息", "Correct bibliography")}</h2><button className="button button-quiet" disabled={pending} onClick={close}>{text("关闭", "Close")}</button></header>
     {query.isPending && <p role="status">{text("读取中…", "Loading…")}</p>}
@@ -98,13 +130,18 @@ function BibliographyCorrection({ issue, projectId, busy, onSync, close }: {
       <p className="muted">{text("只更正同一篇论文的书目信息，不重写正文。标题、DOI 和年份需要修改时，请前往文献库核对身份与范围。", "Correct bibliography for the same paper without rewriting prose. Change title, DOI or year in the library after checking identity and scope.")}</p>
       <a href={`/api/v1/library/papers/${encodeURIComponent(issue.target_id)}/pdf`} target="_blank" rel="noreferrer">{text("打开原始 PDF 对照", "Open source PDF")}</a>
       <p className="muted">{text("只修改有问题的字段，无需全部填满。选填表示不影响保存；作者、期刊等必要信息若仍缺失，检查提示会保留。", "Edit only the fields that need correction. Optional fields do not block saving; missing required bibliography details will still appear in checks.")}</p>
-      <fieldset disabled={saved || pending || busy} className="final-bibliography-fields">{fields.map(([key, zh, en]) => <label key={key}>{text(zh, en)}{text("（选填）", " (optional)")}{key === "authors" ? <textarea rows={4} maxLength={20000} value={values[key] || ""} onChange={e => setValues(v => ({ ...v, [key]: e.target.value }))} /> : <input maxLength={1000} value={values[key] || ""} onChange={e => setValues(v => ({ ...v, [key]: e.target.value }))} />}</label>)}
+      <fieldset disabled={!baseline || saved || pending || busy} className="final-bibliography-fields">{fields.map(([key, zh, en]) => <label key={key}>{text(zh, en)}{text("（选填）", " (optional)")}{key === "authors" ? <textarea rows={4} maxLength={20000} value={values[key] || ""} onChange={e => setValues(v => ({ ...v, [key]: e.target.value }))} /> : <input maxLength={1000} value={values[key] || ""} onChange={e => setValues(v => ({ ...v, [key]: e.target.value }))} />}</label>)}
       <label>{text("核对依据（选填，如 PDF 第 1 页）", "Source location (optional, e.g. PDF page 1)")}<input maxLength={500} value={location} onChange={e => setLocation(e.target.value)} /></label>
       <label className="final-bibliography-confirm"><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />{text("已对照原文，确认是同一篇论文的书目更正。", "I checked the source and this is the same paper.")}</label></fieldset></>}
     {saved && <p role="status">{text("书目已保存。若正文中点名提到作者，请核对这些句子；系统不会自动改写。旧导出文件不会覆盖，请完成同步后重新下载。", "Bibliography saved. Check author names explicitly mentioned in prose; they are not rewritten. Sync and download new exports; existing files remain unchanged.")}</p>}
-    {(query.error || save.error || sync.error) && <div role="alert">{saved ? text("书目已保存，但终稿同步未能提交。请重试同步。", "Saved, but Final sync could not start. Retry sync.") : text("未能读取或保存书目，请检查填写内容；若版本已变化，请关闭后重新打开。", "Could not load or save. Check fields; if the version changed, close and reopen.")}<details><summary>{text("技术详情", "Technical details")}</summary>{(query.error || save.error || sync.error)?.message}</details></div>}
+    {versionConflict && <div role="alert"><p>{text("书目已有新版本，你的输入已保留。请读取最新信息后核对，无需关闭窗口。", "Bibliography has a newer version. Your input is retained. Load the latest information and review it without closing this window.")}</p>
+      <button className="button button-secondary" disabled={pending} onClick={() => reload.mutate()}>{text("读取最新信息并保留修改", "Load latest and keep edits")}</button></div>}
+    {reload.isSuccess && <div role="status"><p>{text("已读取最新信息，并保留你修改的字段。核对后勾选确认，再保存。", "Latest information loaded; your edited fields are retained. Review and check the confirmation before saving.")}</p>
+      {fields.filter(([key]) => key in conflicts).map(([key, zh, en]) => <p key={key}>{text(zh, en)} · {text("最新已保存内容", "Latest saved value")}: {conflicts[key] || "—"}</p>)}</div>}
+    {reload.error && <p role="alert">{text("读取最新信息失败，输入未丢失，请重试。", "Could not load the latest information. Your input is retained; please retry.")}</p>}
+    {(query.error || (!versionConflict && save.error) || sync.error) && <div role="alert">{saved ? text("书目已保存，但终稿同步未能提交。请重试同步。", "Saved, but Final sync could not start. Retry sync.") : text("未能读取或保存书目，已填写内容仍保留。请检查网络和填写内容后重试。", "Could not load or save bibliography. Your input is retained. Check the connection and fields, then retry.")}<details><summary>{text("技术详情", "Technical details")}</summary>{(query.error || save.error || sync.error)?.message}</details></div>}
     {sync.isSuccess && <p role="status">{text("终稿同步已提交，完成后会重新显示检查结果。", "Final sync submitted; findings refresh when it completes.")}</p>}
     {!saved && query.data && !pending && <p className="muted">{busy ? text("终稿正在处理，请等待任务完成后保存。", "Final is busy. Wait for the current task before saving.") : !confirmed ? text("保存前请勾选上方确认项；核对依据可以留空。", "Check the confirmation above to save; source location can be left blank.") : null}</p>}
-    <footer>{!saved ? <button className="button button-primary" disabled={!query.data || !confirmed || pending || busy} onClick={() => save.mutate()}>{pending ? text("保存中…", "Saving…") : text("保存并更新参考文献", "Save and update references")}</button> : sync.isError ? <button className="button button-primary" disabled={pending || busy} onClick={() => sync.mutate()}>{text("重试同步终稿", "Retry Final sync")}</button> : null}</footer>
+    <footer>{!saved ? <button className="button button-primary" disabled={!baseline || !confirmed || pending || busy || versionConflict} onClick={() => save.mutate()}>{pending ? text("保存中…", "Saving…") : text("保存并更新参考文献", "Save and update references")}</button> : sync.isError ? <button className="button button-primary" disabled={pending || busy} onClick={() => sync.mutate()}>{text("重试同步终稿", "Retry Final sync")}</button> : null}</footer>
   </dialog>;
 }

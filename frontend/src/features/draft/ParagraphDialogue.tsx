@@ -24,7 +24,10 @@ export function CandidateEvidenceReview({ candidate }: { candidate: DialogueCand
   const fields: Record<string, string> = { callouts: text("引用标注（请核对来源与论述的对应关系）", "Citations (check source-to-claim attribution)"), numbers: text("数值", "Numbers"), stereo: text("立体化学", "Stereochemistry"), chemical_identities: text("名称或缩写", "Names or abbreviations"), required_labels: text("科学标识", "Scientific labels") };
   if (!candidate.evidence_review) return null;
   return <aside className="message message-warning">
-    <p>{candidate.sources?.length ? text("以下证据供核对，不代表已验证修改正确；你可以确认并保存。", "Sources are provided for comparison, not verification of the changes. You may accept and save.") : text("未提供对应支持证据，请核对；仍可保存本次人工修改。", "No supporting passage was provided. Please review; you may still save this author-directed edit.")}</p>
+    {candidate.evidence_review === "references_unverified" ? <>
+      <p>{text("回复已保留。部分来源标记未能匹配，未列为已核验依据；翻译和措辞讨论可正常参考，涉及新增科学判断时请核对原文。", "The reply is retained. Some source markers could not be matched and are not verified evidence. You can use the translation or wording advice; check original sources for new scientific claims.")}</p>
+      {candidate.candidate_text ? <p>{text("修改候选仍可由你决定是否保存。", "You can still choose whether to save the proposed edit.")}</p> : null}
+    </> : <p>{candidate.sources?.length ? text("以下证据供核对，不代表已验证修改正确；你可以确认并保存。", "Sources are provided for comparison, not verification of the changes. You may accept and save.") : text("未提供对应支持证据，请核对；仍可保存本次人工修改。", "No supporting passage was provided. Please review; you may still save this author-directed edit.")}</p>}
     {candidate.scientific_changes?.map(change => <p key={change.field}>{fields[change.field] || change.field}: {change.before.join(", ") || "—"} → {change.after.join(", ") || "—"}</p>)}
   </aside>;
 }
@@ -44,7 +47,7 @@ export function CandidateComparison({ candidate, disabled, readOnly, decide }: {
     <details><summary>{text("查看依据与检查详情", "Evidence and check details")}{candidate.evidence_review || candidate.validation_errors?.length || candidate.validation_warnings?.length ? text(" · 有待核对提示", " · review suggested") : ""}</summary>
       <CandidateEvidenceReview candidate={candidate} />
       {candidate.context_paragraph_ids?.length ? <p className="muted">{text("本轮只读上下文：", "Read-only context this turn: ")}{candidate.context_paragraph_ids.join(", ")}</p> : null}
-      {[...(candidate.validation_errors || []), ...(candidate.validation_warnings || [])].map((value, i) => <p role="status" key={i}>{value}</p>)}
+      {[...(candidate.validation_errors || []), ...(candidate.validation_warnings || [])].filter(value => value !== "unmatched_source_references").map((value, i) => <p role="status" key={i}>{value}</p>)}
       <EvidenceLinks sources={candidate.sources} legacyRefs={candidate.source_refs} />
     </details>
     {candidate.status === "pending" && !readOnly ? <footer><button className="button button-primary" disabled={disabled} onClick={() => decide(candidate.candidate_id, "accept")}>{text("保存候选", "Save candidate")}</button><button className="button button-secondary" disabled={disabled} onClick={() => decide(candidate.candidate_id, "reject")}>{text("放弃候选", "Discard candidate")}</button></footer> : null}

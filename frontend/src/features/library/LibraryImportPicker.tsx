@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import { useUiText } from "../../i18n/useUiText";
 
-export function LibraryImportPicker({ busy, onFiles, onArchive }: {
-  busy: boolean; onFiles: (files: File[]) => void; onArchive: (file: File) => void;
+export function LibraryImportPicker({ busy, open, onOpenChange, onFiles, onArchive }: {
+  busy: boolean; open?: boolean; onOpenChange?: (open: boolean) => void;
+  onFiles: (files: File[]) => void; onArchive: (file: File) => void;
 }) {
   const { text } = useUiText();
   const menu = useRef<HTMLDetailsElement>(null);
@@ -28,8 +29,8 @@ export function LibraryImportPicker({ busy, onFiles, onArchive }: {
   }
   const selected = files.filter((_, index) => !excluded.has(index));
   const oversized = selected.some(file => file.size > 80 * 1024 * 1024);
-  return <details ref={menu} className="library-import-picker">
-    <summary className="button button-primary">{text("导入文献", "Import papers")}</summary>
+  return <details ref={menu} open={open} onToggle={event => onOpenChange?.(event.currentTarget.open)} className="library-import-picker">
+    <summary className="button button-primary" onClick={open !== undefined && onOpenChange ? event => { event.preventDefault(); onOpenChange(!open); } : undefined}>{text("导入文献", "Import papers")}</summary>
     <div className="library-import-menu">
       <strong>{text("选择导入方式", "Choose an import source")}</strong>
       <div className="library-import-options">
@@ -49,7 +50,7 @@ export function LibraryImportPicker({ busy, onFiles, onArchive }: {
       {error || oversized ? <p className="message message-error" role="alert">{error || text("请取消选择超过 80 MB 的 PDF。", "Deselect PDFs larger than 80 MB.")}</p> : null}
       <button type="button" className="button button-primary" disabled={busy || oversized || (!archive && !selected.length)} onClick={() => {
         if (archive) onArchive(archive); else onFiles(selected);
-        setFiles([]); setArchive(null); if (menu.current) menu.current.open = false;
+        setFiles([]); setArchive(null); onOpenChange?.(false); if (menu.current) menu.current.open = false;
       }}>{busy ? text("正在上传…", "Uploading…") : text("开始导入", "Start import")}</button>
     </div>
   </details>;

@@ -66,6 +66,24 @@ TAXONOMY_PROFILES: tuple[TaxonomyProfileDefinition, ...] = (
 )
 TAXONOMY_PROFILE_BY_ID = {item.id: item for item in TAXONOMY_PROFILES}
 PUBLIC_TAXONOMY_PROFILE_IDS = frozenset({"general_academic", "chemistry_general"})
+# The list the project form offers.  A profile can be valid without being
+# offered: ``general_academic`` stays accepted so projects already using it keep
+# working, but it is no longer a choice while the catalog is being reworked.
+OFFERED_TAXONOMY_PROFILE_IDS = frozenset({"chemistry_general"})
+
+# Legacy private profiles were persisted before the public catalog existed. Map
+# them once, at the API boundary, so no reader has to know the old names and a
+# stored "allene" project compares equal to the option the user sees.
+LEGACY_TAXONOMY_PROFILE_ALIASES = {"allene": "chemistry_general"}
+
+
+def public_taxonomy_profile_id(profile: str) -> str:
+    """Return the public catalog id for a stored profile value."""
+    value = " ".join(str(profile or "").split())
+    value = LEGACY_TAXONOMY_PROFILE_ALIASES.get(value, value)
+    # Unknown stored values fall back to the profile a new project gets, so the
+    # form never shows an option the catalog no longer offers.
+    return value if value in PUBLIC_TAXONOMY_PROFILE_IDS else NEW_PROJECT_TAXONOMY_PROFILE
 
 # Order matters: suggest_taxonomy_profile returns the first profile whose
 # signals match, so the most specific profile (allene) must precede the
@@ -405,7 +423,7 @@ def taxonomy_profile_catalog() -> list[dict[str, Any]]:
     return [
         asdict(item)
         for item in TAXONOMY_PROFILES
-        if item.id in PUBLIC_TAXONOMY_PROFILE_IDS
+        if item.id in OFFERED_TAXONOMY_PROFILE_IDS
     ]
 
 

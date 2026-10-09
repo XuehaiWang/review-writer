@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
-import { apiRequest } from "../../api/client";
+import { apiRequest, jsonBody } from "../../api/client";
 import { externalCandidateId, type DiscoveryPayload, type DiscoveryRow } from "./model/discoveryModel";
+
+/** Bounded probe batches: one request per batch instead of one per candidate. */
+const CHECK_BATCH_SIZE = 20;
 
 export function useFulltextChecks(projectId: string, payload?: DiscoveryPayload) {
   const [checks, setChecks] = useState<Record<string, DiscoveryRow["availability"]>>({});
@@ -9,21 +12,30 @@ export function useFulltextChecks(projectId: string, payload?: DiscoveryPayload)
     if (!projectId || payload?.project_id !== projectId) return;
     const controller = new AbortController();
     const ids = [...new Set((payload.results || []).flatMap(g => g.web_results || []).map(externalCandidateId).filter(Boolean))];
-    let next = 0;
     setChecks(Object.fromEntries(ids.map(id => [id, { state: "checking" }])));
+    const batches: string[][] = [];
+    for (let index = 0; index < ids.length; index += CHECK_BATCH_SIZE) {
+      batches.push(ids.slice(index, index + CHECK_BATCH_SIZE));
+    }
+    // Probing may reach out to the network, so it is a POST and one request
+    // covers a whole batch. Two workers keep results appearing progressively.
     const worker = async () => {
-      while (!controller.signal.aborted && next < ids.length) {
-        const id = ids[next++];
-        let result: DiscoveryRow["availability"];
+      while (!controller.signal.aborted) {
+        const batch = batches.shift();
+        if (!batch) return;
         try {
-          result = await apiRequest<NonNullable<DiscoveryRow["availability"]>>(`/api/v1/projects/${encodeURIComponent(projectId)}/discovery/fulltext-check?candidate_id=${encodeURIComponent(id)}`, { signal: controller.signal });
+          const result = await apiRequest<{ checks: Record<string, DiscoveryRow["availability"]> }>(
+            `/api/v1/projects/${encodeURIComponent(projectId)}/discovery/fulltext-check`,
+            { method: "POST", signal: controller.signal, ...jsonBody({ candidate_ids: batch }) });
+          if (!controller.signal.aborted) setChecks(current => ({ ...current, ...(result.checks || {}) }));
         } catch {
-          result = { state: "unknown" };
+          if (!controller.signal.aborted) {
+            setChecks(current => ({ ...current, ...Object.fromEntries(batch.map(id => [id, { state: "unknown" as const }])) }));
+          }
         }
-        if (!controller.signal.aborted) setChecks(current => ({ ...current, [id]: result }));
       }
     };
-    void Promise.all(Array.from({ length: Math.min(3, ids.length) }, worker));
+    void Promise.all(Array.from({ length: Math.min(2, batches.length) }, worker));
     return () => controller.abort();
   }, [projectId, payload?.artifact_id, payload?.revision]);
   return checks;

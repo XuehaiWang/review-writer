@@ -23,6 +23,7 @@ from review_writer_api.workflow_schemas import (
     DraftTextSaveRequest,
     FinalOverviewTextRequest,
     DraftManuscriptFieldsRequest,
+    DraftPublicationRequest,
     DraftOverviewGenerateRequest, DraftOverviewAdoptRequest, DraftSynthesisAdoptRequest,
 )
 
@@ -68,6 +69,18 @@ def build_drafts_router(
                         principal: Principal = Depends(principal_dependency)):
         return drafts_service.decide_synthesis(principal, project_id, candidate_id, decision="accept",
             expected_base_text_sha256=payload.base_text_sha256, edited_text=payload.text)
+
+    @router.get("/publication")
+    def publication_metadata(project_id: str, principal: Principal = Depends(principal_dependency)):
+        # Publication metadata is authored in Draft and only assembled by Final.
+        return final_service.publication_metadata(principal, project_id)
+
+    @router.put("/publication")
+    def save_publication(project_id: str, payload: DraftPublicationRequest,
+                        principal: Principal = Depends(principal_dependency)):
+        return final_service.save_publication_metadata(principal, project_id,
+            revision=payload.revision, authors=list(payload.authors),
+            affiliations=list(payload.affiliations))
 
     @router.put("/overview-text")
     def caption(project_id: str, payload: FinalOverviewTextRequest,
@@ -161,7 +174,8 @@ def build_drafts_router(
         return _job_response(job_service.submit(principal, scope="project", project_id=project_id,
             job_type="draft.optimize", idempotency_key=key, payload={"project_id": project_id,
                 "revision_mode": "dialogue_batch", "paragraphs": current["paragraphs"],
-                "manuscript_snapshot": manuscript_snapshot(current["paragraphs"], current.get("sections", [])),
+                "manuscript_snapshot": manuscript_snapshot(current["paragraphs"], current.get("sections", []),
+                    records=current.get("content_records"), repetition=current.get("narrative_repetition")),
                 "message": "Analyze and improve this paragraph using the available original-source evidence. Keep the original when no defensible improvement is needed."}))
 
     @router.post("/dialogue-batch/{job_id}/resume", status_code=status.HTTP_202_ACCEPTED)

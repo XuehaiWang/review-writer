@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import base64
-import json
 import tempfile
-import time
 import unittest
 import uuid
 from unittest.mock import patch
@@ -18,13 +16,15 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.security import Principal, Role
+from review_writer_api.tests._test_support import JobPollingMixin
 from review_writer_api.workflow_models import LibraryPaper
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 
 
-class DiscoveryV1Tests(unittest.TestCase):
+class DiscoveryV1Tests(JobPollingMixin, unittest.TestCase):
+    job_poll_timeout_seconds = 3.0
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -92,6 +92,9 @@ class DiscoveryV1Tests(unittest.TestCase):
             database_url=database_url,
             public_origin="http://testserver",
             credential_encryption_key=TEST_KEY,
+            # Jobs below use discovery_builder, never a real provider. Supply
+            # an isolated configured channel so admission tests reach it.
+            text_provider_api_key="test-placeholder-not-a-real-key",
             hosted_workspace_root=root / "users",
         )
 
@@ -241,14 +244,65 @@ class DiscoveryV1Tests(unittest.TestCase):
     def headers(key: str = "request") -> dict[str, str]:
         return {"Origin": "http://testserver", "Idempotency-Key": key}
 
-    def wait_job(self, client: TestClient, job_id: str) -> dict:
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            payload = client.get(f"/api/v1/jobs/{job_id}").json()
-            if payload["status"] in {"succeeded", "failed", "cancelled", "interrupted"}:
-                return payload
-            time.sleep(0.02)
-        self.fail("Job did not finish.")
+    def select_top(self, client, count: int, key: str = ""):
+        """Select the top-N local candidates through the supported save path."""
+        review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        ranked: dict[str, tuple[float, int]] = {}
+        order = 0
+        for group in review.get("results") or []:
+            if group.get("keep") is False:
+                continue
+            for row in group.get("local_results") or []:
+                identity = str(row.get("paper_id") or "")
+                score = float(row.get("score") or row.get("raw_score") or 0)
+                previous = ranked.get(identity)
+                if previous is None or score > previous[0]:
+                    ranked[identity] = (score, order)
+                order += 1
+        chosen = {
+            identity
+            for identity, _rank in sorted(
+                ranked.items(), key=lambda item: (-item[1][0], item[1][1])
+            )[: int(count)]
+        }
+        for group in review.get("results") or []:
+            for row in group.get("local_results") or []:
+                picked = str(row.get("paper_id") or "") in chosen
+                row["selected_for_matrix"] = picked
+                if picked and row.get("role") == "excluded":
+                    row["role"] = "uncertain"
+        return client.put(
+            f"/api/v1/projects/{self.project_id}/discovery",
+            json={"revision": review["revision"], "results": review["results"]},
+            headers=self.headers(key),
+        )
+
+    def set_selected(self, client, paper_id: str, selected: bool):
+        """Toggle one local candidate through the supported save path."""
+        review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        for group in review.get("results") or []:
+            for row in group.get("local_results") or []:
+                if str(row.get("paper_id") or "") == paper_id:
+                    row["selected_for_matrix"] = bool(selected)
+                    if selected and row.get("role") == "excluded":
+                        row["role"] = "uncertain"
+        return client.put(
+            f"/api/v1/projects/{self.project_id}/discovery",
+            json={"revision": review["revision"], "results": review["results"]},
+            headers=self.headers(),
+        )
+
+    def clear_selected(self, client):
+        """Clear every selection through the supported save path."""
+        review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        for group in review.get("results") or []:
+            for row in [*(group.get("local_results") or []), *(group.get("web_results") or [])]:
+                row["selected_for_matrix"] = False
+        return client.put(
+            f"/api/v1/projects/{self.project_id}/discovery",
+            json={"revision": review["revision"], "results": review["results"]},
+            headers=self.headers(),
+        )
 
     def discover(self, client: TestClient, topic: str = "Copper allenation") -> dict:
         response = client.post(
@@ -485,11 +539,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_failed_restart_preserves_current_project(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 1},
-                headers=self.headers(),
-            ).json()
+            selected = self.select_top(client, 1).json()
             confirmed = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -573,11 +623,7 @@ class DiscoveryV1Tests(unittest.TestCase):
         repository = self.app.state.workflow_repository
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 1},
-                headers=self.headers("initial-selection"),
-            ).json()
+            selected = self.select_top(client, 1, "initial-selection").json()
             initial = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -634,11 +680,7 @@ class DiscoveryV1Tests(unittest.TestCase):
         repository = self.app.state.workflow_repository
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 1},
-                headers=self.headers("changed-initial-selection"),
-            ).json()
+            selected = self.select_top(client, 1, "changed-initial-selection").json()
             initial = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -672,11 +714,7 @@ class DiscoveryV1Tests(unittest.TestCase):
                 current_run_id=blueprint_run.id,
             )
             self.discover(client, "Replacement topic")
-            changed_selection = client.post(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 2},
-                headers=self.headers("changed-selection"),
-            ).json()
+            changed_selection = self.select_top(client, 2, "changed-selection").json()
             confirmed = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": changed_selection["revision"]},
@@ -791,11 +829,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_explicit_selection_updates_duplicate_hits(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            response = client.put(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
-                json={"selected": True},
-                headers=self.headers(),
-            )
+            response = self.set_selected(client, "P001", True)
             review = response.json()
         hits = [
             row
@@ -810,7 +844,9 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_discovery_payloads_reject_ambiguous_json_types(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            ambiguous_boolean = client.put(
+            # Selection is edited in the browser and saved once, so the retired
+            # per-candidate selection routes are gone rather than merely loose.
+            retired = client.put(
                 f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
                 json={"selected": "false"},
                 headers=self.headers(),
@@ -820,7 +856,7 @@ class DiscoveryV1Tests(unittest.TestCase):
                 json={"revision": "not-an-integer"},
                 headers=self.headers(),
             )
-        self.assertEqual(422, ambiguous_boolean.status_code)
+        self.assertEqual(404, retired.status_code, retired.text)
         self.assertEqual(422, invalid_revision.status_code)
 
     def test_application_container_exposes_native_task7_services(self) -> None:
@@ -830,27 +866,21 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_top_n_selects_ranked_unique_papers_and_clear_keeps_pool(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 2},
-                headers=self.headers(),
-            ).json()
-            cleared_response = client.delete(
-                f"/api/v1/projects/{self.project_id}/discovery/selection",
-                headers=self.headers(),
-            )
+            selected = self.select_top(client, 2).json()
+            cleared_response = self.clear_selected(client)
             self.assertEqual(200, cleared_response.status_code, cleared_response.text)
             cleared = cleared_response.json()
         self.assertEqual(["P001", "P002"], selected["selected_paper_ids"])
         self.assertEqual(0, cleared["statistics"]["selected_count"])
         self.assertEqual(3, cleared["statistics"]["candidate_count"])
 
-    def test_keyword_and_role_review_persists_and_save_versions(self) -> None:
+    def test_keyword_and_exclusion_review_persists_and_save_versions(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
             current = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
             current["results"][0]["keep"] = False
-            current["results"][1]["local_results"][1]["role"] = "supporting_candidate"
+            current["results"][1]["local_results"][1]["role"] = "excluded"
+            current["results"][1]["local_results"][1]["selected_for_matrix"] = False
             saved = client.put(
                 f"/api/v1/projects/{self.project_id}/discovery",
                 json={"revision": current["revision"], "results": current["results"]},
@@ -860,7 +890,7 @@ class DiscoveryV1Tests(unittest.TestCase):
         self.assertNotEqual(current["artifact_id"], saved["artifact_id"])
         self.assertFalse(reloaded["results"][0]["keep"])
         self.assertEqual(
-            "supporting_candidate",
+            "excluded",
             reloaded["results"][1]["local_results"][1]["role"],
         )
 
@@ -930,11 +960,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_discovery_confirmation_does_not_create_project_tags(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.put(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
-                json={"selected": True},
-                headers=self.headers(),
-            ).json()
+            selected = self.set_selected(client, "P001", True).json()
             confirmed = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -947,11 +973,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_stage_two_defers_formal_classification_to_matrix(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client, topic="Screened tags")
-            selected = client.put(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
-                json={"selected": True},
-                headers=self.headers(),
-            ).json()
+            selected = self.set_selected(client, "P001", True).json()
             confirmed = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -977,11 +999,7 @@ class DiscoveryV1Tests(unittest.TestCase):
 
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.put(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/P001",
-                json={"selected": True},
-                headers=self.headers(),
-            ).json()
+            selected = self.set_selected(client, "P001", True).json()
             confirmed = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -1024,11 +1042,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_confirm_synchronizes_exact_selection(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 2},
-                headers=self.headers(),
-            ).json()
+            selected = self.select_top(client, 2).json()
             confirmed = client.post(
                 f"/api/v1/projects/{self.project_id}/discovery/confirm",
                 json={"revision": selected["revision"]},
@@ -1046,11 +1060,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_confirmation_rejects_selected_paper_absent_from_owners_catalog(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.put(
-                f"/api/v1/projects/{self.project_id}/discovery/selection/P003",
-                json={"selected": True},
-                headers=self.headers(),
-            ).json()
+            selected = self.set_selected(client, "P003", True).json()
             with self.sessions.begin() as session:
                 paper = session.scalar(
                     select(LibraryPaper).where(
@@ -1070,8 +1080,7 @@ class DiscoveryV1Tests(unittest.TestCase):
     def test_confirmation_queues_facts_once_and_get_never_submits(self):
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(f"/api/v1/projects/{self.project_id}/discovery/selection/top",
-                json={"count": 1}, headers=self.headers()).json()
+            selected = self.select_top(client, 1).json()
             with patch.object(self.app.state.job_service, "execution_enabled", False):
                 first = client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm",
                     json={"revision": selected["revision"]}, headers=self.headers())
@@ -1086,10 +1095,28 @@ class DiscoveryV1Tests(unittest.TestCase):
             jobs = self.app.state.workflow_repository.list_project_jobs(self.first.user_id, self.project_id, job_type="matrix.enrich")
             self.assertEqual(1, len(jobs))
 
+    def test_acquisition_batch_publishes_one_revision_for_every_candidate(self) -> None:
+        with TestClient(self.app) as client:
+            self.discover(client)
+            service = self.app.state.discovery_service
+            before = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            with patch.object(service, "_publish_review", wraps=service._publish_review) as published:
+                outcome = service.refresh_acquired_candidates(
+                    self.first,
+                    self.project_id,
+                    [("crossref:10.1/example", "P002"), ("crossref:10.1/example", "P003")],
+                    source_revision=before["revision"],
+                )
+            after = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+        # Downloading several candidates must not republish the review per candidate.
+        self.assertEqual(1, published.call_count)
+        self.assertEqual("refreshed", outcome["status"])
+        self.assertEqual(before["revision"] + 1, after["revision"])
+
     def test_failed_atomic_confirmation_keeps_old_matrix_and_discovery_state_current(self) -> None:
         with TestClient(self.app) as client:
             self.discover(client)
-            selected = client.post(f"/api/v1/projects/{self.project_id}/discovery/selection/top", json={"count": 1}, headers=self.headers()).json()
+            selected = self.select_top(client, 1).json()
             before = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
             with patch.object(self.app.state.workflow_repository, "confirm_discovery_atomically", side_effect=RuntimeError("injected")):
                 response = client.post(f"/api/v1/projects/{self.project_id}/discovery/confirm", json={"revision": selected["revision"]}, headers=self.headers())
@@ -1120,6 +1147,79 @@ class DiscoveryV1Tests(unittest.TestCase):
             self.current = self.second
             hidden = client.get(f"/api/v1/projects/{self.project_id}/discovery")
             self.assertEqual(404, hidden.status_code)
+
+    def test_discovery_download_uses_current_server_candidate_without_library_search(self) -> None:
+        endpoint = f"/api/v1/projects/{self.project_id}/discovery/download-jobs"
+        with TestClient(self.app) as client:
+            self.assertEqual(404, client.post(
+                endpoint,
+                json={"candidate_id": "crossref:10.1/example", "revision": 0},
+                headers=self.headers("before-search"),
+            ).status_code)
+            discovery_service = self.app.state.discovery_service
+            search = discovery_service.search_payload(
+                self.first, self.project_id, {"topic": "Copper allenation"}
+            )
+            discovery_service.replace_from_job(self.first, self.project_id, search, {
+                "results": [{
+                    "keyword": "copper", "keep": True, "local_results": [],
+                    "web_results": [{
+                        "candidate_id": "crossref:10.1/example", "doi": "10.1/example",
+                        "title": "External", "source": "crossref",
+                    }, {
+                        "candidate_id": "external:no-download-source",
+                        "title": "Metadata-only candidate", "source": "external",
+                    }],
+                }],
+            })
+            review = client.get(f"/api/v1/projects/{self.project_id}/discovery").json()
+            repository = self.app.state.workflow_repository
+
+            def record_without_running(_principal, **kwargs):
+                return repository.create_or_get_job(
+                    self.first.user_id, kwargs["project_id"], kwargs["scope"],
+                    kwargs["job_type"], kwargs["idempotency_key"], kwargs["payload"],
+                    operation_key=kwargs["operation_key"],
+                )
+
+            with patch.object(self.app.state.job_service, "submit", side_effect=record_without_running) as submitted:
+                requested = {"candidate_id": "crossref:10.1/example", "revision": review["revision"],
+                             "title": "Forged client title", "pdf_url": "https://untrusted.example/forged.pdf"}
+                response = client.post(endpoint, json=requested, headers=self.headers("discovery-download"))
+                self.assertEqual(202, response.status_code, response.text)
+                job = repository.get_job(self.first.user_id, response.json()["id"])
+                self.assertEqual("External", job.payload["candidates"][0]["title"])
+                self.assertNotIn("pdf_url", job.payload["candidates"][0])
+                self.assertEqual("discovery.acquire", job.job_type)
+                self.assertEqual(self.project_id, job.payload["project_id"])
+                self.assertEqual(review["revision"], job.payload["discovery_revision"])
+                self.assertEqual("project:" + self.project_id, submitted.call_args.kwargs["operation_key"])
+
+                repeated = client.post(endpoint, json=requested, headers=self.headers("second-click"))
+                self.assertEqual(response.json()["id"], repeated.json()["id"])
+                self.assertEqual(1, submitted.call_count)
+
+            self.assertEqual(409, client.post(
+                endpoint,
+                json={"candidate_id": "crossref:10.1/example", "revision": review["revision"] - 1},
+                headers=self.headers("stale"),
+            ).status_code)
+            self.assertEqual(404, client.post(
+                endpoint,
+                json={"candidate_id": "missing", "revision": review["revision"]},
+                headers=self.headers("unknown"),
+            ).status_code)
+            self.assertEqual(422, client.post(
+                endpoint,
+                json={"candidate_id": "external:no-download-source", "revision": review["revision"]},
+                headers=self.headers("no-source"),
+            ).status_code)
+            self.current = self.second
+            self.assertEqual(404, client.post(
+                endpoint,
+                json={"candidate_id": "crossref:10.1/example", "revision": review["revision"]},
+                headers=self.headers("other-owner"),
+            ).status_code)
 
     def test_downloaded_external_candidate_publishes_reviewable_revision_without_matrix_change(self) -> None:
         with TestClient(self.app) as client:

@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from threading import Lock
 from pathlib import Path
@@ -30,7 +32,10 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
-from review_writer_core.model_gateway_client import DeferredModelCall, call_json_model  # noqa: E402
+from review_writer_core.model_gateway_client import DeferredModelCall, call_json_model, text_request_key  # noqa: E402
+from review_writer_core.fact_model_requests import REVIEW_SOURCE_MARKER, fact_request_descriptor, review_prompt_sources
+from review_writer_core.fact_evidence_context import CONTEXT_VERSION, select_fact_evidence_context
+from review_writer_core.abstract_extraction import abstract_value, OPENING_ABSTRACT_INSTRUCTION, recover_opening_abstract
 from review_writer_core.classification_axes import (  # noqa: E402
     axis_requires_formal_route,
     normalize_classification_axes_semantics,
@@ -43,14 +48,16 @@ from review_writer_core.evidence_integrity import (  # noqa: E402
     unsupported_realization_anchors,
 )
 from review_writer_core.evidence_queries import (  # noqa: E402
-    COMPARISON_FIELD_IDS, normalize_fact_request, fact_request_identity,
+    normalize_fact_request, fact_request_identity,
     registered_fact_field_ids,
     extraction_fact_field_ids,
 )
 from review_writer_core.review_fact_readiness import (  # noqa: E402
     DEFAULT_REVIEW_FACT_ROLES,
+    REVIEW_READING_STRATEGY,
     fact_readiness_report,
     fact_processing_state,
+    paper_reading_current,
 )
 from review_writer_core.scientific_facts import (  # noqa: E402
     FACT_PROMPT_VERSION, FACT_VALIDATION_VERSION, fact_identity,
@@ -131,7 +138,7 @@ def normalized_contains(content: str, excerpt: str) -> bool:
 
 
 def all_fact_candidates(paper: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return every source candidate that the extraction prompt exposes."""
+    """Return the trusted registry, including sources outside this prompt budget."""
 
     candidates: dict[str, dict[str, Any]] = {}
     # Put partition candidates first so a duplicate primary fact candidate can
@@ -149,9 +156,16 @@ def all_fact_candidates(paper: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def requested_fact_roles(paper: dict[str, Any]) -> tuple[str, ...]:
-    """Writing questions select work; the full field registry is not a quota."""
+    """Topic roles guide priority and readiness, not the extraction boundary."""
     return registered_fact_field_ids(required_roles=(
         paper.get("required_fact_roles") or DEFAULT_REVIEW_FACT_ROLES))
+
+
+def available_fact_roles(paper: dict[str, Any]) -> tuple[str, ...]:
+    """Permit source-supported facts beyond the Topic's priority roles."""
+    if paper.get("targeted_fact_roles_only"):
+        return requested_fact_roles(paper)
+    return tuple(dict.fromkeys((*requested_fact_roles(paper), *paper_fact_field_ids(paper))))
 
 
 def paper_fact_field_ids(paper: dict[str, Any]) -> tuple[str, ...]:
@@ -167,7 +181,10 @@ def paper_fact_field_ids(paper: dict[str, Any]) -> tuple[str, ...]:
     )
     return extraction_fact_field_ids(
         required_roles=required,
-        evidence_candidates=all_fact_candidates(paper).values(),
+        # Explicit Topic roles keep their priority; inferred vocabulary has no
+        # retrieval-order semantics, including discipline-specific extensions.
+        evidence_candidates=[{"question_ids": sorted(registered_fact_field_ids(
+            evidence_candidates=all_fact_candidates(paper).values()))}],
     )
 
 
@@ -194,6 +211,134 @@ def normalize_failed_fields(
     return fields, details
 
 
+def extraction_context(paper: dict[str, Any]) -> list[dict[str, Any]]:
+    """The single source-window projection used by both prompt and validation."""
+    if "_pending_reading_context" in paper:
+        return deepcopy(paper["_pending_reading_context"])
+    available_roles = list(available_fact_roles(paper))
+    candidates = [
+        {
+            "evidence_key": item.get("evidence_key"),
+            "question_ids": [role for role in item.get("question_ids") or [] if role in available_roles],
+            "allowed_fact_roles": available_roles,
+            "retrieval_passes": item.get("retrieval_passes") or [],
+            "content_type": item.get("content_type"),
+            "page_start": item.get("page_start"),
+            "page_end": item.get("page_end"),
+            "section_path": item.get("section_path"),
+            "content": item.get("content"),
+            **({'opening_candidate': True} if item.get('opening_candidate') is True else {}),
+        }
+        for item in paper.get("evidence_candidates") or []
+        if isinstance(item, dict)
+    ]
+    partition_candidates = [
+        {
+            "evidence_key": item.get("evidence_key"),
+            "allowed_fact_roles": available_roles,
+            "retrieval_passes": item.get("retrieval_passes") or [],
+            "content_type": item.get("content_type"),
+            "page_start": item.get("page_start"),
+            "page_end": item.get("page_end"),
+            "section_path": item.get("section_path"),
+            "content": item.get("content"),
+        }
+        for item in paper.get("partition_evidence_candidates") or []
+        if isinstance(item, dict) and item.get("evidence_key") not in {row["evidence_key"] for row in candidates}
+    ]
+    selected = select_fact_evidence_context(
+        [*candidates, *partition_candidates], roles=available_roles,
+        support_spans=[span for fact in paper.get("repair_fact_candidates") or []
+                       for span in fact.get("support_spans") or []])
+    # Retrieval priority controls selection, not the model's output schema.
+    return [{key: value for key, value in row.items() if key != "retrieval_passes"} for row in selected]
+
+
+def restore_pending_reading_context(paper, topic):
+    """Pin an owned in-flight reading's windows across selector upgrades.
+
+    The handler supplies this prompt only from the same parent and source
+    fingerprint. Validate every old window against the current source registry;
+    both extraction and validation must then see the originally submitted set.
+    """
+    submitted = review_prompt_sources(str(paper.get("pending_reading_prompt") or ""))
+    if submitted is None:
+        return
+    current = review_prompt_sources(review_reading_prompt(topic, paper))
+    if current is None or submitted[0] != current[0]:
+        return
+    registry, restored = all_fact_candidates(paper), []
+    for window in submitted[1]:
+        candidate = registry.get(window["evidence_key"])
+        if not candidate or any(candidate.get(key) != value for key, value in window.items()
+                                if key not in {"content", "evidence_key"}):
+            return
+        full = " ".join(str(candidate.get("content") or "").split())
+        text = window["content"]
+        start = full.find(text)
+        if not text or start < 0:
+            return
+        end = start + len(text)
+        restored.append({**candidate, **window, "source_window": {
+            "start": start, "end": end, "truncated": start > 0 or end < len(full)}})
+    if restored:
+        paper["_pending_reading_context"] = restored
+
+
+def extraction_validation_paper(paper: dict[str, Any]) -> dict[str, Any]:
+    registry = all_fact_candidates(paper)
+    return {**paper, "partition_evidence_candidates": [], "evidence_candidates": [
+        {**registry[row["evidence_key"]], **row} for row in extraction_context(paper)]}
+
+
+def ordinary_review_reading(paper: dict[str, Any]) -> bool:
+    return (paper.get("reading_strategy") == REVIEW_READING_STRATEGY
+            and not paper.get("targeted_fact_roles_only") and not paper.get("verify_only"))
+
+
+def review_reading_prompt(topic: str, paper: dict[str, Any]) -> str:
+    """A compact first reading; source-bound candidates remain navigation."""
+    sources = [{key: row[key] for key in
+                ("evidence_key", "content_type", "page_start", "page_end", "section_path", "content", "opening_candidate")
+                if row.get(key) is not None} for row in extraction_context(paper)]
+    abstract_instruction = (OPENING_ABSTRACT_INSTRUCTION if not abstract_value(paper.get('abstract'))
+                            and any(s.get('opening_candidate') for s in sources) else '')
+    return f"""Read the supplied source windows of one paper for a narrative review.
+Strategy: {REVIEW_READING_STRATEGY}; source selection: {CONTEXT_VERSION}.
+Topic: {topic}
+Paper: {paper.get('paper_id')} — {paper.get('title')}
+Priority fields: {json.dumps(list(requested_fact_roles(paper)), ensure_ascii=False)}
+Available fields: {json.dumps(list(available_fact_roles(paper)), ensure_ascii=False)}
+
+Explain the research question and this paper's own contribution, then retain representative
+source-supported scientific relations useful for the review. Fields are vocabulary, never a
+quota. Keep objects, methods, necessary conditions, results and limits associated with the
+SAME experiment. Preserve distinct important experiments, controls, counterexamples and
+negative findings; do not catalogue every example or split one relation into repeated cards.
+Distinguish own results from cited prior work and unknown ownership using the surrounding
+context. Distinguish observations from author interpretations; do not infer mechanisms,
+superiority, historical priority or unreported limitations. Abstract-only evidence supports
+only its bounded claims. Only these supplied windows were read, not the whole paper.
+
+Return concise JSON with facts, paper_analysis, evidence_requests and failed_fields.
+paper_analysis: research_question, contribution, topic_relation, evidence_keys (supplied
+keys supporting the guide), and open_questions (important unresolved relations, not empty
+field names). This guide and all new facts are UNVERIFIED navigation, not approved evidence.
+facts: field_id, value (faithful compact paraphrase), study_ownership
+(own_results|prior_work|unknown), evidence_key, support_excerpt (exact contiguous source
+quotation), epistemic_status (direct_source_report|source_author_interpretation|
+abstract_level_report), confidence, evidence_ceiling. Include subject, predicate,
+experiment_id and qualifiers only when needed to preserve the scientific relation; all must
+be source-supported. For a relation spanning passages of the SAME experiment use support_spans
+with evidence_key and support_excerpt per passage. Never invent experiment identifiers.
+Do not output verification verdicts, storage metadata or repeated explanations.
+evidence_requests: only material unresolved questions with field_id, query and evidence_keys;
+these are later reading leads, not instructions to fill every field. failed_fields contains
+only attempted unsupported fields. Empty facts is valid if the source-bound guide is useful.
+{abstract_instruction}{REVIEW_SOURCE_MARKER}{json.dumps(sources, ensure_ascii=False)}
+"""
+
+
 def prompt_for_paper(
     topic: str,
     paper: dict[str, Any],
@@ -203,36 +348,11 @@ def prompt_for_paper(
     routing_axis_id: str = "",
     routing_categories: list[dict[str, Any]] | None = None,
 ) -> str:
+    if ordinary_review_reading(paper):
+        return review_reading_prompt(topic, paper)
     required_roles = list(requested_fact_roles(paper))
-    candidates = [
-        {
-            "evidence_key": item.get("evidence_key"),
-            "question_ids": [role for role in item.get("question_ids") or [] if role in required_roles],
-            "allowed_fact_roles": required_roles,
-            "content_type": item.get("content_type"),
-            "page_start": item.get("page_start"),
-            "page_end": item.get("page_end"),
-            "section_path": item.get("section_path"),
-            "content": compact(item.get("content"), 2400),
-        }
-        for item in paper.get("evidence_candidates") or []
-        if isinstance(item, dict) and (not item.get("question_ids")
-            or set(item["question_ids"]) & set(required_roles)
-            or "abstract_summary" in item["question_ids"])
-    ][:14]
-    partition_candidates = [
-        {
-            "evidence_key": item.get("evidence_key"),
-            "allowed_fact_roles": required_roles,
-            "content_type": item.get("content_type"),
-            "page_start": item.get("page_start"),
-            "page_end": item.get("page_end"),
-            "section_path": item.get("section_path"),
-            "content": compact(item.get("content"), 2400),
-        }
-        for item in paper.get("partition_evidence_candidates") or []
-        if isinstance(item, dict) and item.get("evidence_key") not in {row["evidence_key"] for row in candidates}
-    ][:10]
+    available_roles = list(available_fact_roles(paper))
+    candidates = extraction_context(paper)
     partitions = [
         compact(value, 100)
         for value in topic_partitions or []
@@ -352,16 +472,22 @@ from related-work mentions, omissions, or an invented mechanism.
             "evidence_refs": fact.get("evidence_refs") or [],
         }
         for fact in (paper.get("reused_fact_cache") or {}).get("facts") or []
-        if isinstance(fact, dict) and fact.get("field_id") in required_roles
+        if isinstance(fact, dict) and fact.get("field_id") in available_roles
     ]
     return f"""Extract reusable scientific fact cards for one paper in a narrative review.
+Source selection policy: {CONTEXT_VERSION}. Only supplied windows have been read.
 
 Review topic: {topic}
 Paper ID: {paper.get('paper_id')}
 Paper title: {paper.get('title')}
-Available fact fields for this review: {json.dumps(required_roles, ensure_ascii=False)}
+Topic-priority fields: {json.dumps(required_roles, ensure_ascii=False)}
+Available fact fields: {json.dumps(available_roles, ensure_ascii=False)}
 
-Extract ONLY the requested roles above, using principal objects and representative findings needed for this review.
+Extract the paper's own contribution and source-supported findings relevant to the review.
+Use any available field supported by a supplied passage, even if it is not a Topic-priority
+field. Prefer priority fields when selecting examples; do not treat the field list as a quota.
+Do not extract related-work statements as this paper's own results. If only an abstract is
+available, retain its limited claims but do not invent full-text conditions or results.
 Retain distinct experiments and relevant counterexamples. These fields are a vocabulary, not
 a checklist every paper must fill. Request additional evidence only for a necessary unresolved
 scientific relation, not every empty field.
@@ -373,8 +499,8 @@ Each evidence request contains field_id, query (the question to answer), target_
 and evidence_keys (known passages needing context). Use this focused local-source request for a
 missing key result, condition, counterexample, or experiment. It does not authorize
 web access. Empty evidence_requests is allowed. Each fact must have:
-- field_id: exactly one question_id offered by its selected evidence, or one
-  allowed_fact_role when a partition evidence candidate is used;
+- field_id: one of the supplied allowed_fact_roles. question_ids explain retrieval,
+  not a limit on which supported role a passage may establish;
 - value: summarize the bounded finding in your own words, retaining scientific objects,
   quantities and conditions; never copy a source sentence as the fact's display value;
 - study_ownership: own_results, prior_work, or unknown. Determine ownership from surrounding
@@ -404,10 +530,12 @@ Corrections require a separate supported relation verdict before they replace an
 Check each paper's principal contribution, validation and exceptions, not only support
 for the intended review thesis. Do not infer a
 mechanism from outcomes, convert absence into a limitation, or turn an abstract into detailed
-conditions or numerical claims. If a field is unsupported, list it in failed_fields and omit the
-fact. Do not silently drop relevant experiments to fit a one-fact-per-field template.
-Do not extract optional roles or expand into unrelated fields. A partition evidence candidate may
-also support a required fact role when its quoted content directly states that fact. Return
+conditions or numerical claims. If an attempted fact is unsupported, list its field in
+failed_fields and omit the fact. Do not silently drop relevant experiments to fit a
+one-fact-per-field template. Do not mark every unused field as failed or request evidence
+for every empty vocabulary role.
+Do not expand into unrelated findings. A partition evidence candidate may
+also support an available fact role when its quoted content directly states that fact. Return
 failed_fields either as field-id strings or as objects with `field_id` and `reason`; never serialize
 an object into a string.
 The following facts were already hard-validated for the same user's identical source
@@ -423,8 +551,7 @@ not project truth, and will be revalidated by the host before Matrix publication
 Evidence candidates:
 {json.dumps(candidates, ensure_ascii=False)}
 
-Partition evidence candidates:
-{json.dumps(partition_candidates, ensure_ascii=False)}
+Classification and factual evidence share this source list; do not infer evidence from absent passages.
 """
 
 
@@ -1041,7 +1168,7 @@ def refresh_fact_status(paper, result, state=None):
     result.update(fact_processing_state(result.get("facts") or [], {
         **result, "fact_extraction_profile": {**(result.get("fact_extraction_profile") or {}), **state}}))
     result["status"] = ("complete" if coverage["review_readiness"] == "complete" and not unresolved
-                        else "limited" if coverage["background_fact_count"] and not coverage["supported_fact_roles"]
+                        else "limited" if result.get("facts") and not coverage["supported_fact_roles"]
                         else "partial" if result.get("facts") else "failed")
     return result
 
@@ -1186,6 +1313,11 @@ def normalize_result(
         )
         ownership = str(raw.get("study_ownership") or "unknown")
         facts[-1]["study_ownership"] = ownership if ownership in {"own_results", "prior_work", "unknown"} else "unknown"
+        if paper.get("reading_strategy") == REVIEW_READING_STRATEGY:
+            facts[-1]["extraction"]["reading_strategy"] = REVIEW_READING_STRATEGY
+            facts[-1]["verification"] = {"status": "pending"}
+            facts[-1]["support_level"] = "context_only"
+            facts[-1]["assertion_ceiling"] = "context_only_until_relation_verified"
         facts[-1]["fact_id"] = fact_identity(facts[-1])
         correction = str(raw.get("correction_of_fact_id") or "")
         previous = next((f for f in paper.get("repair_fact_candidates") or []
@@ -1242,12 +1374,17 @@ def normalize_result(
         "paper_id": str(paper.get("paper_id") or ""),
         "status": status,
         "facts": facts,
+        **({'abstract_recovery': recovered} if (recovered := recover_opening_abstract(
+            generated.get('abstract_recovery'), list(analysis_candidates.values()), existing=paper.get('abstract'))) else {}),
         "paper_analysis": {
             **{key: compact(analysis.get(key), 1500)
                for key in ("research_question", "contribution", "topic_relation")},
             "evidence_keys": [key for key in analysis.get("evidence_keys") or []
                               if isinstance(key, str) and key in analysis_candidates],
             "usage": "navigation_only",
+            **({"open_questions": [compact(question, 500) for question in analysis.get("open_questions") or []
+                                    if isinstance(question, str) and compact(question, 500)]}
+               if paper.get("reading_strategy") == REVIEW_READING_STRATEGY else {}),
             "fact_ids": [fact["fact_id"] for fact in facts if any(ref.get("evidence_key") in
                 (analysis.get("evidence_keys") or [])
                 for ref in fact.get("evidence_refs") or [])],
@@ -1484,6 +1621,9 @@ def merge_reused_fact_cache(
 
 
 def cache_covers_current_fields(paper: dict[str, Any]) -> bool:
+    cache_version = str((paper.get("reused_fact_cache") or {}).get("prompt_version") or "")
+    if cache_version and cache_version != FACT_PROMPT_VERSION:
+        return False
     offered = set(requested_fact_roles(paper))
     sources = all_fact_candidates(paper)
     cached = {
@@ -1573,7 +1713,7 @@ def run_fact_agent(paper, result, *, model_call, retrieve, state, report):
 
     def normalize_request(raw):
         # Unrequested fields remain vocabulary, not extra work for this pass.
-        return normalize_fact_request(raw, allowed_field_ids=set(requested_fact_roles(paper)) | {
+        return normalize_fact_request(raw, allowed_field_ids=set(available_fact_roles(paper)) | {
             fact.get("field_id") for fact in result.get("facts") or []
             if fact.get("correction_of_fact_id") or (fact.get("verification") or {}).get("source_damage")})
 
@@ -1830,6 +1970,7 @@ def run_fact_agent(paper, result, *, model_call, retrieve, state, report):
         supplement_paper = {
             **paper,
             "required_fact_roles": requested_roles,
+            "targeted_fact_roles_only": True,
             "evidence_candidates": [{**item, "question_ids": requested_roles}
                 for key, item in registry.items() if key in context_keys],
             "partition_evidence_candidates": [],
@@ -1848,7 +1989,7 @@ def run_fact_agent(paper, result, *, model_call, retrieve, state, report):
                           if isinstance(fact, dict) and fact.get("field_id") in requested_roles],
                 "evidence_requests": [question for question in response.get("evidence_requests") or []
                                       if isinstance(question, dict) and question.get("field_id") in requested_roles]}
-            supplement = normalize_result(supplement_paper, response)
+            supplement = normalize_result(extraction_validation_paper(supplement_paper), response)
             result["facts"] = merge_facts(result.get("facts") or [], supplement["facts"])
             # Only an explicit successful supplement resolves an old field
             # failure. A missing response field is not proof of recovery.
@@ -1950,8 +2091,23 @@ def resolve_paper_classification(source, paper, result, axes, partitions, routin
     return derive_topic_partition_from_formal_tags(result, partitions)
 
 
+def checkpoint_matches_paper(paper, entry):
+    if not isinstance(entry, dict) or entry.get("source_fingerprint") != paper.get("source_fingerprint"):
+        return False
+    profile = (entry.get("result") or {}).get("fact_extraction_profile") or {}
+    strategy = str(paper.get("reading_strategy") or "")
+    recorded = str(entry.get("reading_strategy") or profile.get("reading_strategy") or "")
+    return strategy == recorded and (not strategy or str(paper.get("reading_source_key") or "") ==
+                                    str(entry.get("reading_source_key") or profile.get("reading_source_key") or ""))
+
+
 def extract_paper(source, paper, previous, *, publish, retrieve):
     """Run one paper's dependent steps; only immutable snapshots are shared."""
+    paper = dict(paper)
+    if "reading_strategy" not in paper and source.get("reading_strategy"):
+        paper["reading_strategy"] = source["reading_strategy"]
+    if source.get("verify_only"):
+        paper["verify_only"] = True
     topic_partitions = [
         compact(item, 100)
         for item in source.get("topic_partitions") or []
@@ -1983,11 +2139,12 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
     paper_id = str(paper.get("paper_id") or "")
     targeted_requests = (source.get("targeted_evidence_requests") or {}).get(paper_id)
     if targeted_requests:
-        paper = {**paper, "required_fact_roles": list(registered_fact_field_ids(required_roles=[
+        paper = {**paper, "targeted_fact_roles_only": True,
+                 "required_fact_roles": list(registered_fact_field_ids(required_roles=[
             request.get("field_id") for request in targeted_requests if isinstance(request, dict)]))}
+    review_reading = ordinary_review_reading(paper) and source.get("operation") != "fact_revision"
     previous_is_current = bool(
-        isinstance(previous, dict)
-        and previous.get("source_fingerprint") == paper.get("source_fingerprint")
+        checkpoint_matches_paper(paper, previous)
         and isinstance(previous.get("result"), dict)
     )
     existing_result = paper.get("existing_fact_result") or {}
@@ -2002,6 +2159,9 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         not targeted_requests and source.get("operation") != "fact_revision"
     )
     attempt_id = str(source.get("attempt_id") or "standalone")
+    if (previous_is_current and review_reading
+            and (state.get("pending_model_request") or {}).get("parent_job_id") == attempt_id):
+        restore_pending_reading_context(paper, str(source.get("review_topic") or ""))
     if state.get("attempt_id") != attempt_id:
         state["attempt_id"] = attempt_id
         state["attempt_model_calls"] = 0
@@ -2016,30 +2176,62 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         if phase != "model_request":
             current_phase, current_details = phase, details
         publish(paper_id, {"source_fingerprint": paper.get("source_fingerprint"),
+                           **({"reading_strategy": paper["reading_strategy"],
+                               "reading_source_key": paper.get("reading_source_key")}
+                              if paper.get("reading_strategy") else {}),
                            "result": checkpoint_result, "agent_state": state}, current_phase, current_details)
 
     def model_call(*args, **kwargs):
-        if state.get("attempt_model_calls", 0) >= state["max_model_calls"]:
+        prompt, label = args[0], kwargs["label"]
+        descriptor = fact_request_descriptor(
+            prompt, label=label, request_key=text_request_key(prompt, label=label, response_format="json"),
+            parent_job_id=attempt_id,
+        )
+        pending = state.get("pending_model_request") or {}
+        if (pending.get("request_key") and all(pending.get(key) == descriptor[key]
+                for key in ("stage", "prompt_fingerprint", "parent_job_id"))):
+            kwargs["resume_request_key"] = pending["request_key"]
+            descriptor = pending
+        resuming = bool(kwargs.get("resume_request_key"))
+        counted = resuming and bool(pending.get("counted"))
+        if not resuming and state.get("attempt_model_calls", 0) >= state["max_model_calls"]:
             raise RuntimeError("The per-paper fact Agent request budget is exhausted; completed facts were retained.")
-        state["model_calls"] = int(state.get("model_calls", 0)) + 1
-        state["attempt_model_calls"] = int(state.get("attempt_model_calls", 0)) + 1
+        if not resuming and os.environ.get("REVIEW_WRITER_DELEGATE_MODEL_CALLS") == "1":
+            # Persist identity before submission, including a lost response or
+            # worker exit before DeferredModelCall can be checkpointed.
+            state["pending_model_request"] = descriptor
+        if not counted:
+            state["model_calls"] = int(state.get("model_calls", 0)) + 1
+            state["attempt_model_calls"] = int(state.get("attempt_model_calls", 0)) + 1
+        if state.get("pending_model_request"):
+            state["pending_model_request"]["counted"] = True
         report("model_request")
         try:
-            return call_json_model(*args, **kwargs)
-        except DeferredModelCall:
+            response = call_json_model(*args, **kwargs)
+        except DeferredModelCall as exc:
             # Submitting a durable child is not a completed paper-level model
             # call. Restore both counters before the checkpoint is resumed;
             # the cached result will count exactly once when it is consumed.
             state["model_calls"] -= 1
             state["attempt_model_calls"] -= 1
+            state["waiting_model_job_ids"] = exc.model_job_ids
+            if exc.request_key:
+                state["pending_model_request"] = {**descriptor, "request_key": exc.request_key, "counted": False}
             report("model_request")
             raise
+        except Exception:
+            state.pop("waiting_model_job_ids", None)
+            raise
+        else:
+            state.pop("waiting_model_job_ids", None)
+            state.pop("pending_model_request", None)
+            return response
 
     report("restoring" if previous_is_current else "extracting")
-    if source.get("operation") == "fact_revision":
+    if source.get("operation") == "fact_revision" or paper.get("verify_only"):
         state["verify_only"] = True
         result = dict(checkpoint_result) if previous_is_current else {
-            "paper_id": paper_id, "facts": list(paper.get("revision_facts") or []),
+            "paper_id": paper_id, "facts": list(paper.get("revision_facts") or existing_result.get("facts") or []),
             "failed_fields": [], "status": "partial"}
     elif targeted_requests:
         result = dict(checkpoint_result) if previous_is_current else {
@@ -2048,10 +2240,17 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         }
         result["evidence_requests"] = targeted_requests
     elif (
-        previous_is_current and bool(checkpoint_result.get("facts"))
+        previous_is_current and not (review_reading and
+            (checkpoint_result.get("fact_extraction_profile") or {}).get("reading_status") == "failed")
+        and (bool(checkpoint_result.get("facts")) or (
+            review_reading and paper_reading_current([], checkpoint_result,
+                                                     source_key=paper.get("reading_source_key"))))
     ):
         result = deepcopy(previous["result"])
-    elif existing_result.get("facts"):
+    elif (existing_result.get("facts") or (
+        review_reading and paper_reading_current([], existing_result, source_key=paper.get("reading_source_key"))
+    )) and not (review_reading and
+                (existing_result.get("fact_extraction_profile") or {}).get("reading_status") == "failed"):
         result = deepcopy(existing_result)
     elif (paper.get("reusable_fact_result") or {}).get("facts"):
         # The source facts remain current while the classification contract
@@ -2075,11 +2274,12 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         }
         checkpoint_result = deepcopy(result)
         report("classification_refresh")
-        result = resolve_paper_classification(
-            source, paper, result, classification_axes, topic_partitions,
-            routing_axis_id, routing_categories, model_call=model_call, report=report,
-            allow_existing_evidence=True,
-        )
+        if not review_reading:
+            result = resolve_paper_classification(
+                source, paper, result, classification_axes, topic_partitions,
+                routing_axis_id, routing_categories, model_call=model_call, report=report,
+                allow_existing_evidence=True,
+            )
     elif (
         cache_covers_current_fields(paper)
         and not topic_partitions
@@ -2148,6 +2348,7 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         }
     else:
         try:
+            state.pop("reading_failed", None)
             generated = model_call(
                 prompt_for_paper(
                     str(source.get("review_topic") or ""),
@@ -2161,7 +2362,7 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
                 timeout_seconds=330,
                 required_list="facts",
             )
-            requested = set(requested_fact_roles(paper))
+            requested = set(available_fact_roles(paper))
             generated = {**generated,
                 "facts": [fact for fact in generated.get("facts") or []
                           if isinstance(fact, dict) and fact.get("field_id") in requested],
@@ -2170,26 +2371,37 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
                 "evidence_requests": [request for request in generated.get("evidence_requests") or []
                                       if isinstance(request, dict) and request.get("field_id") in requested]}
             result = normalize_result(
-                paper,
+                extraction_validation_paper(paper),
                 generated,
-                topic_partitions,
-                classification_axes,
+                [] if review_reading else topic_partitions,
+                [] if review_reading else classification_axes,
             )
             result["evidence_requests"] = generated.get("evidence_requests") or []
+            selected = extraction_context(paper)
+            result["selection_report"] = {"version": CONTEXT_VERSION,
+                "candidate_count": len(all_fact_candidates(paper)), "selected_count": len(selected),
+                "source_chars": sum(len(row["content"]) for row in selected),
+                "not_shown": [{"evidence_key": key, "reason": "outside_source_window_budget"}
+                              for key in all_fact_candidates(paper)
+                              if key not in {row["evidence_key"] for row in selected}],
+                "windows": [{"evidence_key": row["evidence_key"], **row["source_window"]} for row in selected]}
             result = merge_reused_fact_cache(result, paper)
-            if routing_axis_id and routing_categories:
+            if not review_reading and routing_axis_id and routing_categories:
                 first_pass_route = normalize_routing_recommendation(
-                    paper, generated, routing_axis_id, routing_categories
+                    extraction_validation_paper(paper), generated, routing_axis_id, routing_categories
                 )
                 if first_pass_route.get("status") == "classified":
                     first_pass_route["extraction_method"] = "initial_fact_pass"
                     result["routing_recommendation"] = first_pass_route
             checkpoint_result = result
-            result = resolve_paper_classification(
-                source, paper, result, classification_axes, topic_partitions,
-                routing_axis_id, routing_categories, model_call=model_call, report=report,
-            )
+            if not review_reading:
+                result = resolve_paper_classification(
+                    source, paper, result, classification_axes, topic_partitions,
+                    routing_axis_id, routing_categories, model_call=model_call, report=report,
+                )
         except Exception as exc:
+            if review_reading:
+                state["reading_failed"] = True
             result = {
                 "paper_id": paper_id,
                 "status": "failed",
@@ -2220,7 +2432,7 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
                 result, paper, provider_failed=True
             )
     route = result.get("routing_recommendation") or {}
-    if route.get("status") == "classified" and not route.get("verification_fact_id"):
+    if not review_reading and route.get("status") == "classified" and not route.get("verification_fact_id"):
         candidate = {"paper_id": paper_id, "field_id": "topic_partition", "fact_type": "classification",
             "classification_axis_id": route.get("axis_id"),
             "value": f"This study's primary contribution belongs to {route.get('axis_id')}: {route.get('label')}",
@@ -2233,14 +2445,21 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
         route["verification_fact_id"] = candidate["fact_id"]
         result.setdefault("facts", []).append(candidate)
     checkpoint_result = result
-    if result.get("facts") or result.get("evidence_requests") or result.get("normalization_rejections"):
+    if review_reading:
+        restored = restore_cached_verifications(paper, result)
+        state["verification_cache_hits"] = int(state.get("verification_cache_hits", 0)) + restored
+        # These are navigation leads, not scheduled audits or a broad supplement.
+        state["unresolved_requests"] = list(result.get("evidence_requests") or [])
+        state["stop_reason"] = "reading_failed" if state.get("reading_failed") else "reading_completed"
+    elif result.get("facts") or result.get("evidence_requests") or result.get("normalization_rejections"):
         run_fact_agent(paper, result, model_call=model_call, retrieve=retrieve,
                        state=state, report=report)
     if route.get("verification_fact_id"):
         checked = next((fact for fact in result.get("facts") or [] if fact.get("fact_id") == route["verification_fact_id"]), {})
         route["verification"] = dict(checked.get("verification") or {})
     result.setdefault("fact_extraction_profile", {}).update({
-        "mode": "bounded_fact_agent", "verification_policy": "plain_quotes_and_targeted_audit/1",
+        "mode": "review_reading" if review_reading else "bounded_fact_agent",
+        "verification_policy": "on_use/1" if review_reading else "plain_quotes_and_targeted_audit/1",
         "requested_fact_roles": list(requested_fact_roles(paper)),
         "validation_contract": FACT_VALIDATION_VERSION,
         "model_calls": state.get("model_calls", 0),
@@ -2263,6 +2482,39 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
     })
     if state.get("error"):
         result["error"] = state["error"]
+    if review_reading:
+        sources = all_fact_candidates(paper)
+        analysis = result.get("paper_analysis") or {}
+        guide_keys = [key for key in analysis.get("evidence_keys") or [] if key in sources]
+        guide_bound = bool(guide_keys and any(analysis.get(key) for key in
+                                             ("research_question", "contribution", "topic_relation")))
+        facts_bound = any(fact_support_spans(fact, sources) for fact in result.get("facts") or [])
+        complete = bool(paper.get("reading_source_key") and (guide_bound or facts_bound)
+                        and not state.get("reading_failed"))
+        profile = result["fact_extraction_profile"]
+        profile.update(reading_strategy=REVIEW_READING_STRATEGY,
+                       reading_source_key=str(paper.get("reading_source_key") or ""),
+                       reading_status="completed" if complete else "failed",
+                       stop_reason="reading_completed" if complete else "reading_failed")
+        state["stop_reason"] = profile["stop_reason"]
+        if result.get("selection_report"):
+            analysis["reading_scope"] = deepcopy(result["selection_report"])
+            result["paper_analysis"] = analysis
+        result["status"] = "complete" if complete else "failed"
+        result["review_status"] = "not_required" if complete else "needs_review"
+        if complete:
+            result["error"] = ""
+        elif not result.get("error"):
+            result["error"] = "Reading did not produce a source-bound guide or candidate relation."
+        result.update(fact_processing_state(result.get("facts") or [], result))
+    else:
+        # A targeted audit has its own execution status; retain a prior reading
+        # receipt without claiming that the new source or audit is complete.
+        old_profile = existing_result.get("fact_extraction_profile") or {}
+        for key in ("reading_strategy", "reading_source_key", "reading_status"):
+            if key in old_profile:
+                result["fact_extraction_profile"].setdefault(key, old_profile[key])
+        result.update(fact_processing_state(result.get("facts") or [], result))
     if routing_axis_id and "routing_recommendation" not in result:
         result["routing_recommendation"] = {
             "schema_version": 1,
@@ -2287,8 +2539,11 @@ def extract_paper(source, paper, previous, *, publish, retrieve):
 
 def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retrieve,
                   max_new_papers=None):
-    """Overlap independent papers while serializing checkpoint/progress writes."""
+    """Advance a bounded paper window and checkpoint before yielding model waits."""
     papers = deepcopy([item for item in source.get("papers") or [] if isinstance(item, dict)])
+    for paper in papers:
+        if "reading_strategy" not in paper and source.get("reading_strategy"):
+            paper["reading_strategy"] = source["reading_strategy"]
     paper_ids = [str(paper.get("paper_id") or "") for paper in papers]
     if any(not paper_id for paper_id in paper_ids) or len(set(paper_ids)) != len(paper_ids):
         raise ValueError("Matrix extraction requires unique, non-empty paper IDs.")
@@ -2297,11 +2552,11 @@ def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retriev
     completed = []
     if max_new_papers is not None and checkpoint.get("source_matrix_artifact_id") == source.get("source_matrix_artifact_id"):
         recorded = set(checkpoint.get("completed_papers") or [])
-        fingerprints = {str(paper["paper_id"]): paper.get("source_fingerprint") for paper in papers}
+        inputs = {str(paper["paper_id"]): paper for paper in papers}
         completed = [paper_id for paper_id in paper_ids
                      if paper_id in recorded
                      and isinstance(entries.get(paper_id, {}).get("result"), dict)
-                     and entries[paper_id].get("source_fingerprint") == fingerprints[paper_id]]
+                     and checkpoint_matches_paper(inputs[paper_id], entries[paper_id])]
     active = {}
     lock = Lock()
 
@@ -2332,15 +2587,54 @@ def enrich_papers(source, checkpoint, *, save_checkpoint, save_progress, retriev
         paper.setdefault("actual_model_id", source.get("actual_model_id"))
         return extract_paper(source, paper, previous.get(str(paper["paper_id"])), publish=publish, retrieve=retrieve)
 
-    selected = papers if max_new_papers is None else [
-        paper for paper in papers if str(paper["paper_id"]) not in completed
-    ][:max(1, int(max_new_papers))]
+    pending = [paper for paper in papers if str(paper["paper_id"]) not in completed]
+    deferred = {str(paper["paper_id"]): list(state["waiting_model_job_ids"])
+                for paper in pending
+                if (entry := previous.get(str(paper["paper_id"]), {}))
+                and checkpoint_matches_paper(paper, entry)
+                and (state := entry.get("agent_state") or {}).get("waiting_model_job_ids")}
+    resuming = deque(paper for paper in pending if str(paper["paper_id"]) in deferred)
+    pending = iter([paper for paper in pending if str(paper["paper_id"]) not in deferred])
     workers = max(1, min(3, int((source.get("fact_agent_limits") or {}).get("paper_concurrency", 1))))
-    with ThreadPoolExecutor(max_workers=min(workers, len(selected) or 1)) as executor:
-        # map preserves Matrix order even when later papers finish first.
-        results = list(executor.map(execute, selected))
-    if max_new_papers is None:
-        return results
+    batch_limit = max(1, int(max_new_papers)) if max_new_papers is not None else len(papers)
+    capacity = min(workers, batch_limit) or 1
+    finished = 0
+    running = {}
+    with ThreadPoolExecutor(max_workers=capacity) as executor:
+        while True:
+            # Durable waits still occupy this project's paper window, even
+            # though they release the local thread. Completed papers free a
+            # slot immediately; cap completions per turn for fair scheduling.
+            while len(running) < capacity:
+                if resuming:
+                    # A reduced limit stops new work, not recovery of requests
+                    # already submitted under the previous limit.
+                    paper = resuming.popleft()
+                    deferred.pop(str(paper["paper_id"]))
+                elif (len(running) + len(deferred) < capacity
+                      and finished + len(running) < batch_limit):
+                    paper = next(pending, None)
+                else:
+                    break
+                if paper is None:
+                    break
+                running[executor.submit(execute, paper)] = str(paper["paper_id"])
+            if not running:
+                break
+            ready, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in ready:
+                paper_id = running.pop(future)
+                try:
+                    future.result()
+                except DeferredModelCall as exc:
+                    deferred[paper_id] = exc.model_job_ids
+                else:
+                    finished += 1
+    if deferred:
+        model_job_ids = [job_id for paper_id in paper_ids
+                         for job_id in deferred.get(paper_id, [])]
+        raise DeferredModelCall(model_job_ids[0], model_job_ids=model_job_ids)
+    # Publication order stays stable regardless of completion order.
     return [entries[paper_id]["result"] for paper_id in paper_ids if paper_id in completed]
 
 

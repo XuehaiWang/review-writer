@@ -362,7 +362,7 @@ class OverviewFigureHelperTests(unittest.TestCase):
         self.assertIn('return False, "structure_panel_not_detected", ""', source)
         self.assertNotIn('return True, "", "appended-dock"', source)
         self.assertIn('"overview_axis_contract": {}', source)
-        self.assertIn("visible = len(atoms)", source)
+        self.assertNotIn("def render_smiles_ball_and_stick", source)
         self.assertIn("output_path.stat().st_size", source)
 
 

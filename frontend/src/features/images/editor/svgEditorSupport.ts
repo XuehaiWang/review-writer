@@ -33,7 +33,7 @@ export function loadFullSvgWorkspace(
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         response = await apiRequest<FullSvgResponse>(
-          `/api/v1/projects/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(figureId)}/full-svg`,
+          `/api/v1/projects/${encodeURIComponent(projectId)}/images/${encodeURIComponent(figureId)}/full-svg`,
           { method: "POST", ...jsonBody({ base_mode: baseMode }) },
         );
         break;

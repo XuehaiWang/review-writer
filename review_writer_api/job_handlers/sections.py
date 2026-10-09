@@ -10,9 +10,11 @@ from pathlib import Path
 from review_writer_api.job_handlers.support import (
     section_generation_timeout_seconds as _section_generation_timeout_seconds,
 )
-from review_writer_core.stages.sections.coverage import reusable_section_entries
 from review_writer_api.job_service import JobYieldRequested
 from review_writer_core.stages.sections.execution import DEFAULT_SECTION_CONCURRENCY
+from review_writer_core.stages.sections.source_writing import section_audit_mode
+from review_writer_api.domain_services.section_evidence_supplement import SectionEvidenceSupplement
+from review_writer_api.security import Principal, Role
 
 
 class SectionJobHandlers:
@@ -75,6 +77,12 @@ class SectionJobHandlers:
     def sections_generate(self, context, payload):
         """Run the established section writer in an isolated compatibility workspace."""
 
+        if payload.get("experimental_findings") is True:
+            raise RuntimeError(
+                "This retired experimental writing job cannot be resumed. Its saved "
+                "chapter outputs and checkpoints remain unchanged; start standard "
+                "chapter generation instead."
+            )
         staging = self._staging(context.user_id, context.job_id)
         workspace = staging / "section-workspace"
         project_id = str(payload["project_id"])
@@ -139,7 +147,16 @@ class SectionJobHandlers:
             encoding="utf-8",
         )
         normal, secrets = self._text_gateway_environment(context)
-        normal["REVIEW_SECTION_AUDIT_MODE"] = os.environ.get("REVIEW_SECTION_AUDIT_MODE", "full")
+        supplement = SectionEvidenceSupplement(
+            getattr(self, "sections_service", None), Principal(context.user_id, frozenset({Role.USER})),
+            payload, staging / "section-evidence-mailbox")
+        if supplement.enabled:
+            normal["REVIEW_SECTION_EVIDENCE_MAILBOX"] = str(supplement.directory)
+            normal["REVIEW_SECTION_EVIDENCE_MAILBOX_NONCE"] = supplement.validation_nonce
+        requested_audit = os.environ.get("REVIEW_SECTION_AUDIT_MODE", "full")
+        normal["REVIEW_SECTION_AUDIT_MODE"] = ("full" if any(
+            section_audit_mode(task, requested_audit) == "full" for task in payload.get("tasks") or []
+        ) else requested_audit)
         if self.model_gateway is not None and os.environ.get("REVIEW_WRITER_DELEGATED_MODEL_ENABLED") == "1":
             normal["REVIEW_WRITER_DELEGATE_MODEL_CALLS"] = "1"
         relative_stage = Path("section-workspace") / "review-projects" / project_id / "02_section_drafting"
@@ -154,16 +171,9 @@ class SectionJobHandlers:
         if isinstance(resume_checkpoint, dict):
             if context.retry_of_job_id:
                 resume_checkpoint = {**resume_checkpoint, "failed_sections": []}
-            entries, rejected = reusable_section_entries(
-                resume_checkpoint.get("entries") or {}, payload.get("tasks") or [],
-                {row["section_id"]: row for row in (payload.get("evidence_package") or {}).get("sections") or []},
-            )
-            resume_checkpoint = {
-                **resume_checkpoint,
-                "entries": entries,
-                "rejected_entries": rejected,
-                "resume_validated": True,
-            }
+            # The CLI has the complete current task, source, model, and rule
+            # fingerprints. Do not bless ID-only matches here: the same ID
+            # can refer to a different topic after a revised Blueprint.
             checkpoint_file.write_text(
                 json.dumps(resume_checkpoint, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -173,6 +183,12 @@ class SectionJobHandlers:
         section_timeout_seconds = _section_generation_timeout_seconds(
             payload.get("tasks"), resume_checkpoint
         )
+        report_progress = self._section_progress_callback(context, progress_file, checkpoint_file)
+
+        def progress_callback():
+            supplement.process_mailbox()
+            report_progress()
+
         self.runner.run(
             [
                 sys.executable,
@@ -196,13 +212,11 @@ class SectionJobHandlers:
             env=normal,
             secret_env=secrets,
             cancel_requested=context.cancellation_requested,
-            progress_callback=self._section_progress_callback(
-                context, progress_file, checkpoint_file
-            ),
+            progress_callback=progress_callback,
             max_attempts=1,
             timeout_seconds=section_timeout_seconds,
         )
-        self._section_progress_callback(context, progress_file, checkpoint_file)()
+        progress_callback()
         task_ids = {
             str(task.get("section_id") or "")
             for task in payload.get("tasks") or []
@@ -272,7 +286,7 @@ class SectionJobHandlers:
             # hydrated snapshot rather than the queued job's stale payload.
             # The stage handler consumes this private value; it is never
             # persisted as a workflow artifact.
-            "_publication_payload": payload,
+            "_publication_payload": supplement.publication_payload(latest_checkpoint),
             "sections": drafts.get("sections") or [],
             "synthesis_state": json.loads(
                 (section_stage / "synthesis_state.json").read_text(encoding="utf-8")

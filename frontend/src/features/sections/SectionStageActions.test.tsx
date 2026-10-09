@@ -18,6 +18,11 @@ const base = {
 };
 
 describe("SectionStageActions", () => {
+  it("shows a single chapter-generation action without the retired experiment", () => {
+    render(<SectionStageActions {...base} current={false} />);
+    expect(screen.getByRole("button", { name: "生成章节正文" })).toBeEnabled();
+    expect(screen.queryByText("实验性写作选项")).not.toBeInTheDocument();
+  });
   it("explains omitted sections before the existing confirmation", () => {
     render(<SectionStageActions {...base} pendingHeadings={["Development history"]} />);
     expect(screen.getByRole("status")).toHaveTextContent("本次不包含：Development history");

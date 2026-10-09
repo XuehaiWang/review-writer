@@ -1,5 +1,4 @@
 import copy
-import json
 
 from review_writer_core.stages.figures.overview_prompt_context import (
     compact_json, overview_prompt_context,

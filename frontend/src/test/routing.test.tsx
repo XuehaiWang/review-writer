@@ -97,7 +97,7 @@ describe("public and authenticated routing", () => {
     fireEvent.change(screen.getByLabelText("密码"), { target: { value: "correct-password" } });
     fireEvent.click(screen.getByRole("button", { name: "登录并进入工作台" }));
 
-    expect(await screen.findByRole("heading", { name: "科学综述项目" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "化学综述项目" })).toBeInTheDocument();
   });
 
   it("requests a password reset without revealing whether the email exists", async () => {

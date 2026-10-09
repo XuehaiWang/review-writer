@@ -10,6 +10,49 @@ from typing import Any
 from review_writer_core.metadata_fields import unwrap_metadata_value
 
 
+def dedupe(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        value = re.sub(r"\s+", " ", str(value).strip())
+        key = value.lower()
+        if value and key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def unique_keyword_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        key = item["keyword"].lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def format_crossref_authors(authors: list[dict[str, Any]]) -> list[str]:
+    out = []
+    for author in authors[:8]:
+        name = " ".join(x for x in [author.get("given"), author.get("family")] if x)
+        if name:
+            out.append(name)
+    return out
+
+
+def result_dedupe_key(row: dict[str, Any]) -> str:
+    doi = (row.get("doi") or "").strip().lower()
+    if doi:
+        return "doi:" + doi
+    url = (row.get("url") or "").strip().lower()
+    if url:
+        return "url:" + url
+    title = re.sub(r"\s+", " ", str(row.get("title") or "").strip().lower())
+    return "title:" + title
+
+
 def _candidate_id(row: dict[str, Any], *, external: bool) -> str:
     if external:
         return str(

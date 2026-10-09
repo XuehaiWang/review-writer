@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 
-QUERY_WORD = re.compile(r"[\u3400-\u9fff]|[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*")
+QUERY_WORD = re.compile(r"[\u3400-\u9fff]{2,}|[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*")
 QUERY_STOPWORDS = {
     "a", "an", "and", "as", "at", "by", "for", "from", "in", "into",
     "of", "on", "or", "the", "their", "this", "through", "to", "using",
@@ -116,10 +116,17 @@ def query_terms(value: Any, *, limit: int = 8) -> list[str]:
         term = match.group(0)
         if term in QUERY_STOPWORDS or len(term) < 2:
             continue
-        if term not in output:
-            output.append(term)
-        if len(output) >= limit:
-            break
+        # Preserve CJK questions instead of discarding every single character.
+        # Adjacent pairs provide lexical navigation without a domain taxonomy
+        # or a paid translation call; they are not semantic evidence labels.
+        tokens = [term]
+        if re.fullmatch(r"[\u3400-\u9fff]{3,}", term):
+            tokens.extend(term[index:index + 2] for index in range(len(term) - 1))
+        for token in tokens:
+            if token not in output:
+                output.append(token)
+            if len(output) >= limit:
+                return output
     return output
 
 
@@ -323,6 +330,7 @@ def build_question_query_plans(
     must_cover_points: list[Any] | None = None,
     scientific_claims: list[Any] | None = None,
     required_fact_roles: list[Any] | None = None,
+    review_problem: str = "",
 ) -> list[dict[str, Any]]:
     """Build short Boolean groups without turning prose into one long query."""
 
@@ -370,7 +378,8 @@ def build_question_query_plans(
     definitions: list[dict[str, Any]] = [
         {
             "question_id": "section_focus",
-            "terms": [],
+            "terms": query_terms(review_problem, limit=12),
+            "question": str(review_problem or heading).strip(),
             "coverage_policy": "all_primary",
             "required_for_section": True,
             "query_route": "focus",
@@ -398,7 +407,7 @@ def build_question_query_plans(
         for field_id in sorted(declared_roles - set(COMPARISON_FIELD_IDS))
     )
 
-    definitions.extend({"question_id": f"writing_question_{index}", "terms": query_terms(question, limit=12),
+    definitions.extend({"question_id": f"writing_question_{index}", "question": str(question), "terms": query_terms(question, limit=12),
                         "coverage_policy": "evidence_bearing", "required_for_section": False, "query_route": "writing_question"}
                        for index, question in enumerate(dict.fromkeys(research_questions or []), 1)
                        if str(question).strip())

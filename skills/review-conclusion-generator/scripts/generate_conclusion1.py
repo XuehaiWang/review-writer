@@ -44,6 +44,7 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from review_writer_core.atomic_io import atomic_write_json as write_json  # noqa: E402
 from review_writer_core.providers import (  # noqa: E402
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_TEXT_MODEL,
@@ -139,13 +140,6 @@ def read_json(path: Path) -> Any:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
-
-
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
 
 
 def write_text(path: Path, text: str) -> None:

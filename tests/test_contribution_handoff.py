@@ -23,13 +23,15 @@ def test_section_input_change_keeps_independent_sections_but_refreshes_dependent
     retained, rejected = matching_section_inputs(entries, after, legacy_validated=True)
     assert set(retained) == {"S2"}
     assert set(rejected) == {"S1", "S3"}
-    # Shared scientific scope and citation renumbering must invalidate all sections.
+    # Shared scientific scope stays global, so it invalidates every section.
     blueprint["review_topic"] = "A new scope"
     changed = section_input_fingerprints(tasks, {}, matrix, blueprint, shared)
     assert all(after[sid] != changed[sid] for sid in after)
+    # Citation order is chapter-local now: reversing rows leaves each chapter's
+    # own paper rows identical, so completed sections stay reusable.
     matrix["rows"].reverse()
     renumbered = section_input_fingerprints(tasks, {}, matrix, blueprint, shared)
-    assert all(changed[sid] != renumbered[sid] for sid in changed)
+    assert all(changed[sid] == renumbered[sid] for sid in changed)
 
 
 def test_navigation_uses_current_order_and_never_crosses_section_boundaries():
@@ -114,10 +116,12 @@ def test_planned_table_does_not_count_as_table_coverage_without_exportable_rows(
     assert task == before
 
 
-def test_shared_chapter_responsibility_change_invalidates_all_peer_prompts():
+def test_chapter_responsibility_change_invalidates_its_own_section_only():
     tasks = [{"section_id": "A", "writing_objective": "Compare methods"},
              {"section_id": "B", "writing_objective": "Discuss scope"}]
     before = section_input_fingerprints(tasks, {}, {"rows": []}, {}, {})
     tasks[0]["avoid_points"] = ["Leave applicability limits to B"]
     after = section_input_fingerprints(tasks, {}, {"rows": []}, {}, {})
-    assert all(before[sid] != after[sid] for sid in before)
+    # The edited chapter is invalidated, but its independent peer stays reusable.
+    assert before["A"] != after["A"]
+    assert before["B"] == after["B"]

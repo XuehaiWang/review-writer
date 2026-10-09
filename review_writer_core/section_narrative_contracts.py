@@ -430,91 +430,192 @@ def derive_scientific_thesis(
     }
 
 
-def _target_range(value: Any) -> tuple[int, int]:
-    if isinstance(value, (int, float)) and int(value) > 0:
-        target = int(value)
-        return max(300, round(target * 0.8)), max(500, round(target * 1.25))
-    numbers = [int(number) for number in re.findall(r"\d+", str(value or ""))]
-    if len(numbers) >= 2:
-        low, high = sorted(numbers[:2])
-        return max(300, low), max(low, high)
-    if numbers:
-        return _target_range(numbers[0])
-    return 0, 0
-
-
 def resolve_section_depth_contract(section: Mapping[str, Any]) -> dict[str, Any]:
-    """Repair stale automatic budgets after paper ownership changes.
-
-    Explicit/custom contracts are preserved. A derived contract that asks for
-    more than 350 words per planned paragraph is recalculated from current roles.
-    """
-    saved = dict(section.get("depth_contract") or {})
-    paragraphs = int(saved.get("target_paragraph_count") or 0)
-    if (saved.get("diagnostic_policy") == "derived_not_hard_word_quota" and paragraphs
-            and int(saved.get("target_word_min") or 0) > paragraphs * 350):
-        current = dict(section)
-        current.pop("target_words", None)
-        return derive_section_depth_contract(current)
-    return saved or derive_section_depth_contract(section)
+    """Project legacy contracts without resurrecting automatic writing quotas."""
+    return derive_section_depth_contract(section)
 
 
 def derive_section_depth_contract(section: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a measurable, non-prescriptive depth target for one section."""
-
-    role = _compact(section.get("section_role"), limit=40).casefold() or "body"
-    paper_count = len(_paper_ids(section))
-    current_min, current_max = _target_range(section.get("target_words"))
-    if role in {"introduction", "conclusion"}:
-        paragraph_count = 5
-        default_min, default_max = 700, 1150
-        minimum_comparisons = 0 if role == "introduction" else 1
-    elif paper_count <= 1:
-        paragraph_count = 4
-        default_min, default_max = 650, 1000
-        minimum_comparisons = 0
-    elif paper_count == 2:
-        paragraph_count = 5
-        default_min, default_max = 800, 1250
-        minimum_comparisons = 1
-    elif paper_count <= 4:
-        paragraph_count = 6
-        default_min, default_max = 1000, 1550
-        minimum_comparisons = 2
-    else:
-        paragraph_count = min(9, 6 + (paper_count - 3) // 2)
-        default_min = min(1800, 1100 + (paper_count - 4) * 100)
-        default_max = min(2600, default_min + 650)
-        minimum_comparisons = 2
-    # Current argument plans require realization of their core claims. Paper counts
-    # alone do not establish a scientific need for comparison paragraphs.
-    if "argument_order" in section:
-        minimum_comparisons = 0
+    """Compatibility-shaped diagnostics; scientific depth is not word count."""
     return {
-        "target_paragraph_count": paragraph_count,
-        "target_word_min": current_min or default_min,
-        "target_word_max": current_max or default_max,
-        "minimum_comparison_paragraphs": minimum_comparisons,
-        "requires_section_synthesis_exit": role in {"body", "conclusion"},
-        "required_paragraph_roles": (
-            ["section_frame"]
-            if role == "introduction"
-            else ["section_synthesis_exit"]
-            if role == "conclusion"
-            else [
-                "section_frame",
-                "anchor_case",
-                *(
-                    ["cross_study_comparison"]
-                    if minimum_comparisons
-                    else []
-                ),
-                "section_synthesis_exit",
-            ]
-        ),
-        "paper_count": paper_count,
-        "diagnostic_policy": "derived_not_hard_word_quota",
+        "target_paragraph_count": 0, "target_word_min": 0, "target_word_max": 0,
+        "minimum_comparison_paragraphs": 0, "requires_section_synthesis_exit": False,
+        "required_paragraph_roles": [], "paper_count": len(_paper_ids(section)),
+        "diagnostic_policy": "evidence_adaptive_no_quota",
     }
+
+
+def build_section_writing_task(section: Mapping[str, Any], *, current_evidence=None) -> dict[str, Any]:
+    """Project scientific instructions, not retrieval-stage work orders.
+
+    Never rewrite free-text instructions by matching domain words. Remove only
+    exact repetitions, preserving explicit scope, exceptions and user wording.
+    """
+    result = {key: deepcopy(section.get(key)) for key in (
+        "heading", "section_role", "writing_objective", "questions_to_answer",
+        "core_argument", "avoid_points", "primary_papers", "supporting_papers")}
+    normalized = lambda text: " ".join(str(text or "").split())
+    if normalized(result["core_argument"]) == normalized(result["writing_objective"]):
+        result.pop("core_argument")
+    for key in ("questions_to_answer", "avoid_points"):
+        if isinstance(result[key], list):
+            unique = []
+            for item in result[key]:
+                if item not in unique:
+                    unique.append(item)
+            result[key] = unique
+    # Retrieval still consumes the original task. The writer receives checks
+    # as coverage context, not as a second mandatory paragraph outline.
+    result["argument_question"] = deepcopy(section.get("review_problem") or section.get("writing_objective"))
+    result["evidence_checks"] = {
+        "questions": result.pop("questions_to_answer"),
+        "usage": "coverage_context_not_a_prose_checklist; preserve explicit user requests; "
+                 "use relevant answers to develop the argument, not one answer per paragraph",
+    }
+    if current_evidence is not None:
+        # Keep scientific scope verbatim, but stop presenting an old planning
+        # work order as the current execution objective. No keyword deletion.
+        result["planning_snapshot"] = {
+            "original_objective": result.pop("writing_objective"),
+            "usage": "Preserve scientific scope, exclusions and explicit user requirements. "
+                     "Availability/retrieval statements describe planning time, not today's sources. "
+                     "Do not write a retrieval plan or repeat availability disclaimers in the manuscript.",
+        }
+        result["argument_question"] = deepcopy(section.get("review_problem") or section.get("heading"))
+        observed = {}
+        for row in current_evidence:
+            if not isinstance(row, Mapping):
+                continue
+            pid = str(row.get("paper_id") or "")
+            state = observed.setdefault(pid, {"paper_id": pid, "source_channels": [], "assertion_ceilings": []})
+            for field, target in (("source_channel", "source_channels"), ("assertion_ceiling", "assertion_ceilings")):
+                if row.get(field) and row[field] not in state[target]:
+                    state[target].append(row[field])
+        result["current_evidence_scope"] = {
+            "papers": list(observed.values()), "coverage": "supplied_excerpts_only_not_complete_full_text",
+            "usage": "Use each supplied passage's channel and assertion ceiling; unknown metadata is not proof of full-text coverage. "
+                     "Do not globally promote abstract-only papers because another paper has body text.",
+        }
+    # Body method sections carry a "shopping list": which facts to keep and which
+    # per-compound detail to express as a category or range instead of writing it
+    # out. Introduction/Conclusion keep their own narrative guidance untouched.
+    if str(section.get("section_role") or "").strip().casefold() == "body":
+        required = [
+            "transformation", "key_catalyst", "outcome", "scope_class", "decisive_boundary",
+        ]
+        # Only ask for the synthetic-application item when this chapter actually
+        # describes one; never force a chapter to invent an application.
+        if _declares_application(section):
+            required.append("synthetic_application")
+        result["required_evidence"] = required
+        result["excluded_by_default"] = [
+            "per_compound_id", "individual_yield", "screening_steps",
+            "routine_ops", "unrelated_mechanism", "closing_summary",
+        ]
+        # The reader table is projected from result_context alone, so prose
+        # compression must not also shrink the records: a method summarized as a
+        # category in the prose still needs its own row, because a body section
+        # with fewer than two records from two papers loses its table entirely.
+        result["table_record_policy"] = (
+            "prose_may_compress_to_category_or_range_but_result_context_records_stay_complete; "
+            "one_record_per_reported_method; fewer_than_two_records_from_two_papers_drops_the_table"
+        )
+    return result
+
+
+# An application is only requested when the chapter itself declares one; the
+# terms are intentionally narrow so an ordinary synthetic method does not turn
+# into a mandatory application sentence.
+_APPLICATION_TERMS = re.compile(
+    r"\b(?:synthetic\s+applications?|applications?\s+in|total\s+synthesis|multi[- ]gram|gram[- ]scale|"
+    r"scale[- ]up|derivatization|derivatisation|practical\s+(?:use|synthesis)|late[- ]stage)"
+    r"|合成应用|全合成|多克|克级|放大|衍生化",
+    re.I,
+)
+
+
+def _declares_application(section: Mapping[str, Any]) -> bool:
+    """True when the chapter's own text/reasons describe a synthetic application."""
+    parts = [str(section.get(key) or "") for key in
+             ("heading", "title", "writing_objective", "review_problem", "core_argument")]
+    for role in section.get("paper_roles") or []:
+        if isinstance(role, Mapping):
+            parts.append(str(role.get("reason") or ""))
+    return bool(_APPLICATION_TERMS.search(" ".join(parts)))
+
+
+def build_question_evidence_navigation(section, sources):
+    """Request-local question → source pointers, never new evidence or a filter.
+
+    Use retrieval memberships first. Lexical overlap is only a navigation hint
+    for legacy/direct-key facts; retain every unmatched source separately.
+    Source IDs here must be the aliases actually displayed to this request.
+    """
+    from .evidence_queries import query_terms
+
+    questions = [("section_focus", str(section.get("review_problem") or section.get("heading") or "").strip())]
+    legacy = list(dict.fromkeys([*(section.get("questions_to_answer") or []),
+                                *(section.get("retrieval_directions") or [])]))
+    questions.extend((f"writing_question_{index}", str(question).strip())
+                     for index, question in enumerate(legacy, 1) if str(question).strip())
+    groups, assigned = [], set()
+    source_terms = [set(query_terms(source.get("content") or "", limit=1000)) for source in sources]
+    for qid, question in questions:
+        if not question:
+            continue
+        terms = set(query_terms(question, limit=12))
+        ranked = []
+        for index, source in enumerate(sources):
+            membership = qid in (source.get("question_ids") or [])
+            overlap = len(terms & source_terms[index])
+            if membership or overlap:
+                ranked.append((not membership, -overlap, index, source["evidence_key"]))
+        refs = [item[-1] for item in sorted(ranked)]
+        assigned.update(refs)
+        groups.append({"question_id": qid, "question": question, "source_refs": refs})
+    return {"questions": groups,
+            "other_source_refs": [row["evidence_key"] for row in sources if row["evidence_key"] not in assigned],
+            "source_ownership": {row["evidence_key"]: row["study_ownership"]
+                                 for row in sources if row.get("study_ownership")},
+            "usage": "navigation_not_entailment_or_paragraph_checklist; inspect contrary evidence and conditions; "
+                     "empty matches mean unlocated_support_not_absence; all supplied sources remain available; "
+                     "adapt the argument, not the user's scope; a key study may deserve a whole paragraph"}
+
+
+def build_chapter_navigation(responsibilities, *, section_id):
+    """Other chapters define boundaries, not another set of paragraph instructions."""
+    result = []
+    for row in responsibilities or []:
+        if not isinstance(row, Mapping) or str(row.get("section_id")) == str(section_id):
+            continue
+        item = {key: deepcopy(row.get(key)) for key in (
+            "section_id", "heading", "review_problem", "avoid_points", "primary_papers", "supporting_papers")}
+        item["planning_snapshot"] = {"original_objective": deepcopy(row.get("writing_objective")),
+                                     "usage": "scientific_boundary_not_current_retrieval_status"}
+        result.append(item)
+    return result
+
+
+def build_section_writing_guidance(section: Mapping[str, Any]) -> dict[str, Any]:
+    """Read-only navigation; no generated budgets or presumed scientific conclusions."""
+    result = {key: deepcopy(section[key]) for key in (
+        "review_problem", "organizing_thread", "paper_roles", "notes"
+    ) if section.get(key)}
+    result["mergeable_points"] = list(dict.fromkeys(
+        str(value).strip() for value in section.get("paragraph_tasks") or [] if str(value).strip()))
+    if section.get("requested_length"):
+        result["requested_length"] = deepcopy(section["requested_length"])
+    elif section.get("target_words_source") in {"user", "explicit_user"}:
+        result["requested_length"] = section.get("target_words")
+    elif (section.get("depth_contract") or {}).get("diagnostic_policy") == "user_defined":
+        result["requested_length"] = {key: section["depth_contract"][key] for key in
+                                      ("target_word_min", "target_word_max")
+                                      if section["depth_contract"].get(key)}
+    result["usage"] = (
+        "planning_snapshot_not_current_retrieval_status; navigation_not_evidence; "
+        "no mandatory paragraph count or closing summary"
+    )
+    return result
 
 
 def canonical_argument_role(
@@ -552,22 +653,83 @@ def canonical_argument_role(
     return "cross_study_comparison" if paper_count > 1 else "anchor_case"
 
 
+_BLUEPRINT_CLAIM_ROLES = {
+    "foundation": "section_frame",
+    "extension": "method_extension",
+    "contrast": "cross_study_comparison",
+    "comparison": "cross_study_comparison",
+    "mechanism": "mechanism_boundary",
+    "limitation": "scope_limitation",
+    "synthesis": "section_synthesis_exit",
+}
+
+
+def build_paragraph_plan(section: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    """Turn Blueprint review_claims into a hard per-paragraph skeleton.
+
+    Returns None when the section has no review_claims so the caller keeps the
+    existing free-form path. Each entry carries a canonical argument role, the
+    papers allowed in that paragraph, the claim's purpose (planning text, never
+    prose to copy), and its comparison axes.
+    """
+    claims = section.get("review_claims")
+    if not isinstance(claims, list) or not claims:
+        return None
+    plans: list[dict[str, Any]] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        papers = _unique(
+            (
+                str(item.get("paper_id") or "")
+                for item in claim.get("supporting_papers") or []
+                if isinstance(item, dict) and str(item.get("paper_id") or "").strip()
+            ),
+            limit=10000,
+        )
+        if not papers:
+            continue
+        claim_type = _compact(claim.get("claim_type"), limit=40).casefold().replace("-", "_")
+        role = _BLUEPRINT_CLAIM_ROLES.get(
+            claim_type,
+            canonical_argument_role(claim_type, paper_count=len(papers)),
+        )
+        plans.append(
+            {
+                "role": role,
+                "papers": papers,
+                "purpose": _compact(claim.get("claim")),
+                "comparison_axes": _unique(
+                    str(value) for value in (claim.get("comparison_axes") or [])
+                ),
+                "wording_constraints": _unique(
+                    (
+                        str(value)
+                        for value in (claim.get("wording_constraints") or [])
+                        if str(value).strip()
+                    ),
+                    limit=20,
+                ),
+            }
+        )
+    return plans or None
+
+
 def derive_narrative_diagnostics(
     writing_section: Mapping[str, Any],
     depth_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Measure paragraph-role and comparison coverage from a Writing Plan."""
 
-    contract = depth_contract or {}
     semantic_review = writing_section.get("section_review")
     if isinstance(semantic_review, dict):
         complete = semantic_review.get("status") == "coherent"
         issues = list(semantic_review.get("issues") or [])
         # Processing notes and partial audits do not establish a structural flaw.
         incomplete = semantic_review.get("status") == "needs_revision"
-        return {"status": "complete" if complete else "shallow" if incomplete else "not_reviewed",
+        return {"status": "complete" if complete else "advisory" if incomplete else "not_reviewed",
                 "paragraph_count": len(writing_section.get("paragraphs") or []),
-                "missing_requirements": ["section_thread_review"] if incomplete else [],
+                "missing_requirements": [],
                 "issues": issues,
                 "review_status": semantic_review.get("status"),
                 "diagnostic_policy": "semantic_thread_not_role_quota"}
@@ -585,22 +747,13 @@ def derive_narrative_diagnostics(
         )
         for index, paragraph in enumerate(paragraphs)
     ]
-    required = [str(role) for role in contract.get("required_paragraph_roles") or []]
-    missing = [role for role in required if role not in roles]
     comparison_count = roles.count("cross_study_comparison")
-    minimum_comparisons = int(contract.get("minimum_comparison_paragraphs") or 0)
-    if comparison_count < minimum_comparisons:
-        missing.append("cross_study_comparison_quota")
-    if contract.get("requires_section_synthesis_exit") and (
-        not roles or roles[-1] != "section_synthesis_exit"
-    ):
-        missing.append("section_synthesis_exit_position")
     return {
-        "status": "complete" if not missing else "shallow",
+        "status": "not_reviewed",
         "paragraph_count": len(paragraphs),
-        "target_paragraph_count": int(contract.get("target_paragraph_count") or 0),
+        "target_paragraph_count": 0,
         "paragraph_roles": roles,
         "comparison_paragraph_count": comparison_count,
-        "minimum_comparison_paragraphs": minimum_comparisons,
-        "missing_requirements": list(dict.fromkeys(missing)),
+        "minimum_comparison_paragraphs": 0,
+        "missing_requirements": [],
     }

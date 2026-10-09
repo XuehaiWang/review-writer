@@ -1,8 +1,64 @@
 import pytest
+import json
 
 from review_writer_core.manuscript_coherence import (
     manuscript_snapshot, plan_manuscript, audit_candidate, candidate_check_current,
+    paragraph_records, current_records, assembly_records,
 )
+
+
+def test_records_expire_only_for_changed_prose_and_rebind_only_at_assembly():
+    original = rows()
+    writing = {'paragraphs': [{**p, 'reader_takeaway': 'Bounded finding',
+                              'evidence_uses': [{'source_refs': ['A:1'], 'purpose': 'Scope'}]}
+                             for p in original]}
+    records = paragraph_records(original, writing)
+    rendered = [{**p, 'text': p['text'] + ' [1]'} for p in original]
+    rebound = assembly_records(rendered, [{'paragraphs': original, 'content_records': records}])
+    assert len(current_records(rendered, rebound)) == 2
+    changed = [{**rendered[0], 'text': 'User revised this paragraph.'}, rendered[1]]
+    assert list(current_records(changed, rebound)) == ['S2-p1']
+    assert assembly_records(rendered, [{'paragraphs': changed, 'content_records': records}]) == {}
+    assert current_records(original, {}) == {}
+    assert paragraph_records(original, {}) == {}
+
+
+def test_long_snapshot_covers_later_chapters_without_repeating_prose():
+    paragraphs = [{'paragraph_id': f'S{s}-p{p}', 'paragraph_key': f'{s}-{p}',
+                   'text': f'Chapter {s} point {p}. ' + 'bounded result ' * 45}
+                  for s in range(1, 8) for p in range(1, 11)]
+    sections = [{'section_id': f'S{s}', 'title': f'Chapter {s}',
+                 'paragraphs': paragraphs[(s-1)*10:s*10]} for s in range(1, 8)]
+    snapshot = manuscript_snapshot(paragraphs, sections, limit=9000, repetition={'hints': []})
+    assert all(c['included'] >= 1 for c in snapshot['coverage'])
+    assert len(snapshot['paragraphs']) < len(paragraphs)
+    assert len(json.dumps(snapshot, ensure_ascii=False)) <= 9000
+    assert len({p['paragraph_id'] for p in snapshot['paragraphs']}) == len(snapshot['paragraphs'])
+    original = {p['paragraph_id']: p['text'] for p in paragraphs}
+    assert all(p['text'] == original[p['paragraph_id']] for p in snapshot['paragraphs'])
+
+
+def test_full_short_snapshot_uses_prose_not_duplicate_summaries_and_refs_only_hints():
+    records = paragraph_records(rows(), {'paragraphs': [dict(p, reader_takeaway='Same study, different role') for p in rows()]})
+    hint = {'kind': 'wording_overlap', 'paragraph_id': 'S1-p1', 'other_paragraph_id': 'S2-p1',
+            'excerpt': 'Duplicated text should not be transmitted'}
+    snapshot = manuscript_snapshot(rows(), records=records, repetition={'hints': [hint, hint]})
+    assert snapshot['records'] == {}
+    assert len(snapshot['repetition_groups']) == 1
+    assert 'excerpt' not in snapshot['repetition_groups'][0]
+    prompts = []
+    def call(prompt, **kwargs):
+        prompts.append(prompt)
+        return {'issues': []}
+    assert plan_manuscript(snapshot, call)['issues'] == []
+    assert 'shared paper or terminology alone is not duplication' in prompts[0]
+    assert 'do not force transitions' in prompts[0]
+
+
+def test_empty_snapshot_never_calls_model_and_duplicate_issues_are_coalesced():
+    assert plan_manuscript(manuscript_snapshot([]), lambda *a, **k: pytest.fail('no call'))['status'] == 'complete'
+    issue = {'paragraph_id': 'S1-p1', 'excerpt': rows()[0]['text'], 'instruction': 'Keep conditions.', 'dependencies': []}
+    assert len(plan_manuscript(manuscript_snapshot(rows()), lambda *a, **k: {'issues': [issue, issue]})['issues']) == 1
 
 
 def rows():
@@ -21,7 +77,8 @@ def test_plan_requires_exact_location_and_known_dependencies():
 
 
 def test_long_manuscript_plan_cannot_claim_full_coverage():
-    snapshot = manuscript_snapshot(rows(), limit=30)
+    paragraphs = [dict(p, text=p['text'] * 18) for p in rows()]
+    snapshot = manuscript_snapshot(paragraphs, limit=1200)
     assert len(snapshot["paragraphs"]) == 1
     assert plan_manuscript(snapshot, lambda *a, **k: {"issues": []})["status"] == "partial"
 

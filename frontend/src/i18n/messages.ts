@@ -2,7 +2,7 @@ import type { Language } from "../state/preferences";
 
 const messages = {
   "zh-CN": {
-    productSubtitle: "科学综述工作台",
+    productSubtitle: "化学综述工作台",
     connecting: "正在连接",
     hosted: "托管模式",
     local: "本地模式",
@@ -22,7 +22,7 @@ const messages = {
     final: "终稿",
   },
   en: {
-    productSubtitle: "Scientific Review Workspace",
+    productSubtitle: "Chemistry Review Workspace",
     connecting: "Connecting",
     hosted: "Hosted",
     local: "Local",

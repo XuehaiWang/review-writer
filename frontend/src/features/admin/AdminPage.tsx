@@ -409,8 +409,10 @@ export function AdminPage() {
       </div> : null}
 
       {visited.has("activity") ? <div id="admin-activity" className="admin-content-panel" hidden={section !== "activity"}>
-      <WorkerStatusPanel active={section === "activity"} />
-      <ModelConcurrencyPanel active={section === "activity"} />
+      <div className="admin-runtime-grid">
+        <WorkerStatusPanel active={section === "activity"} />
+        <ModelConcurrencyPanel active={section === "activity"} />
+      </div>
       <StorageMaintenance active={section === "activity"} />
       <SystemErrors active={section === "activity"} />
       <section className="surface admin-audit-panel">

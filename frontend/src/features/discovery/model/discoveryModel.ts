@@ -43,6 +43,7 @@ export type DiscoveryPayload = {
   project_id: string;
   artifact_id: string;
   revision: number;
+  candidate_refresh?: { source_artifact_id?: string; candidate_id?: string; paper_id?: string };
   status?: string;
   has_published_matrix?: boolean;
   topic: string;

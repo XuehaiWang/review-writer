@@ -5,7 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
-from threading import Event, Lock
+from threading import Barrier, Event, Lock
 
 import pytest
 from review_writer_core.model_gateway_client import DeferredModelCall
@@ -110,6 +110,203 @@ def test_deferred_paper_model_call_resumes_without_spending_paper_budget_twice(m
     assert snapshots[-1]["completed_papers"] == ["P1"]
 
 
+def test_delegated_papers_resume_ready_sibling_and_refill_bounded_window(monkeypatch, tmp_path):
+    # Keep a real, older completed checkpoint alongside the newly delegated papers.
+    monkeypatch.setattr(PIPELINE, "call_json_model", lambda prompt, **kwargs:
+        verify_response(prompt) if kwargs["required_list"] == "verdicts" else fact_response("P0"))
+    _, previous, _ = execute({"source_matrix_artifact_id": "matrix-1", "attempt_id": "old-job",
+                               "papers": [paper("P0")]})
+    retained = deepcopy(previous[-1]["entries"]["P0"])
+    checkpoint_path = tmp_path / "matrix-checkpoint.json"
+    PIPELINE.write_json(checkpoint_path, previous[-1])
+    source = {"source_matrix_artifact_id": "matrix-1", "attempt_id": "current-job",
+              "papers": [paper(f"P{i}") for i in range(4)],
+              "fact_agent_limits": {"paper_concurrency": 2}}
+    first_dispatches, lock = Barrier(2), Lock()
+    requests, ready, consumed, calls, progress = {}, set(), set(), [], []
+
+    def model(prompt, **kwargs):
+        label = kwargs["label"]
+        with lock:
+            calls.append(label)
+            is_new = label not in requests
+            if is_new:
+                requests[label] = {"prompt": prompt, "child_id": f"child-{label}"}
+            request = requests[label]
+            assert request["prompt"] == prompt, "A pending request must retain its idempotency key"
+            is_ready = label in ready
+            if is_ready:
+                assert label not in consumed, "A successful response must be retained in the paper checkpoint"
+                consumed.add(label)
+        if is_new and label in {"matrix-facts-P1", "matrix-facts-P2"}:
+            first_dispatches.wait(timeout=3)
+        if not is_ready:
+            raise DeferredModelCall(request["child_id"])
+        return verify_response(prompt) if kwargs["required_list"] == "verdicts" else fact_response(
+            label.removeprefix("matrix-facts-"))
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+
+    def run():
+        return PIPELINE.enrich_papers(source, PIPELINE.read_json(checkpoint_path),
+            save_checkpoint=lambda value: PIPELINE.write_json(checkpoint_path, value),
+            save_progress=lambda value: progress.append(deepcopy(value)),
+            retrieve=lambda _: pytest.fail("These facts need no additional retrieval"), max_new_papers=2)
+
+    def expect_waiting(*labels):
+        with pytest.raises(DeferredModelCall) as waiting:
+            run()
+        assert set(waiting.value.model_job_ids) == {f"child-{label}" for label in labels}
+        assert max(len(value["active_paper_ids"]) for value in progress) <= 2
+        state = PIPELINE.read_json(checkpoint_path)
+        assert state["entries"]["P0"] == retained
+        return state
+
+    state = expect_waiting("matrix-facts-P1", "matrix-facts-P2")
+    assert set(requests) == {"matrix-facts-P1", "matrix-facts-P2"}
+    assert state["completed_papers"] == ["P0"]
+    assert all(state["entries"][pid]["agent_state"]["attempt_model_calls"] == 0 for pid in ("P1", "P2"))
+
+    # P1 stays pending while P2 consumes extraction and advances to its own audit.
+    ready.add("matrix-facts-P2")
+    expect_waiting("matrix-facts-P1", "fact-verify-P2")
+    assert "matrix-facts-P3" not in requests
+    ready.add("fact-verify-P2")
+    state = expect_waiting("matrix-facts-P1", "matrix-facts-P3")
+    assert set(state["completed_papers"]) == {"P0", "P2"}
+    assert calls.count("matrix-facts-P2") == 2
+    assert calls.count("fact-verify-P2") == 2
+
+    # The replacement paper can finish too, without waiting for the first paper.
+    ready.add("matrix-facts-P3")
+    expect_waiting("matrix-facts-P1", "fact-verify-P3")
+    ready.add("fact-verify-P3")
+    state = expect_waiting("matrix-facts-P1")
+    assert set(state["completed_papers"]) == {"P0", "P2", "P3"}
+    assert calls.count("matrix-facts-P2") == calls.count("fact-verify-P2") == 2
+
+    ready.add("matrix-facts-P1")
+    expect_waiting("fact-verify-P1")
+    ready.add("fact-verify-P1")
+    results = run()
+    assert [row["paper_id"] for row in results] == ["P0", "P1", "P2", "P3"]
+    assert all(PIPELINE.fact_is_usable(row["facts"][0]) for row in results)
+    assert all(row["fact_extraction_profile"]["model_calls"] == 2 for row in results)
+    assert set(requests) == {f"{stage}-P{i}" for i in (1, 2, 3)
+                             for stage in ("matrix-facts", "fact-verify")}
+    assert consumed == set(requests)
+    finished_calls = list(calls)
+    assert run() == results
+    assert calls == finished_calls
+
+
+def test_delegated_paper_single_slot_does_not_start_a_waiting_sibling(monkeypatch):
+    source = {"source_matrix_artifact_id": "matrix-1", "attempt_id": "job-1",
+              "papers": [paper("P1"), paper("P2"), paper("P3")],
+              "fact_agent_limits": {"paper_concurrency": 1}}
+    calls, snapshots = [], []
+
+    def model(_prompt, **kwargs):
+        calls.append(kwargs["label"])
+        raise DeferredModelCall(f"child-{kwargs['label']}")
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+    for _ in range(2):
+        with pytest.raises(DeferredModelCall) as waiting:
+            PIPELINE.enrich_papers(source, snapshots[-1] if snapshots else {},
+                save_checkpoint=lambda value: snapshots.append(deepcopy(value)),
+                save_progress=lambda _: None, retrieve=lambda _: [], max_new_papers=1)
+        assert waiting.value.model_job_ids == ["child-matrix-facts-P1"]
+        assert snapshots[-1]["completed_papers"] == []
+        assert set(snapshots[-1]["entries"]) == {"P1"}
+    assert calls == ["matrix-facts-P1", "matrix-facts-P1"]
+
+
+def test_reduced_concurrency_drains_existing_papers_before_starting_another(monkeypatch):
+    source = {"source_matrix_artifact_id": "matrix-1", "attempt_id": "job-1",
+              "papers": [paper(f"P{i}") for i in range(1, 5)],
+              "fact_agent_limits": {"paper_concurrency": 3}}
+    barrier, lock = Barrier(3), Lock()
+    calls, ready, consumed, snapshots = [], set(), set(), []
+    first_requests = set()
+
+    def model(prompt, **kwargs):
+        label = kwargs["label"]
+        with lock:
+            calls.append(label)
+            first = label not in first_requests
+            first_requests.add(label)
+            completed = label in ready
+            if completed:
+                assert label not in consumed, "An already consumed result must stay in its checkpoint"
+                consumed.add(label)
+        if first and label in {"matrix-facts-P1", "matrix-facts-P2", "matrix-facts-P3"}:
+            barrier.wait(timeout=3)
+        if not completed:
+            raise DeferredModelCall(f"child-{label}")
+        return verify_response(prompt) if kwargs["required_list"] == "verdicts" else fact_response(
+            label.removeprefix("matrix-facts-"))
+
+    monkeypatch.setattr(PIPELINE, "call_json_model", model)
+
+    def expect_waiting(*labels):
+        with pytest.raises(DeferredModelCall) as waiting:
+            PIPELINE.enrich_papers(source, snapshots[-1] if snapshots else {},
+                save_checkpoint=lambda value: snapshots.append(deepcopy(value)),
+                save_progress=lambda _: None, retrieve=lambda _: [],
+                max_new_papers=source["fact_agent_limits"]["paper_concurrency"])
+        assert set(waiting.value.model_job_ids) == {f"child-{label}" for label in labels}
+        assert "matrix-facts-P4" not in calls
+        return snapshots[-1]
+
+    expect_waiting("matrix-facts-P1", "matrix-facts-P2", "matrix-facts-P3")
+    assert set(calls) == {"matrix-facts-P1", "matrix-facts-P2", "matrix-facts-P3"}
+
+    source["fact_agent_limits"]["paper_concurrency"] = 1
+    ready.add("matrix-facts-P2")
+    expect_waiting("matrix-facts-P1", "fact-verify-P2", "matrix-facts-P3")
+    assert consumed == {"matrix-facts-P2"}
+    ready.add("fact-verify-P2")
+    state = expect_waiting("matrix-facts-P1", "matrix-facts-P3")
+    assert state["completed_papers"] == ["P2"]
+    assert calls.count("matrix-facts-P2") == calls.count("fact-verify-P2") == 2
+    assert PIPELINE.fact_is_usable(state["entries"]["P2"]["result"]["facts"][0])
+
+    # Another ready legacy paper must remain recoverable after P2 leaves the window.
+    ready.add("matrix-facts-P3")
+    expect_waiting("matrix-facts-P1", "fact-verify-P3")
+    assert consumed == {"matrix-facts-P2", "fact-verify-P2", "matrix-facts-P3"}
+    assert calls.count("matrix-facts-P2") == calls.count("fact-verify-P2") == 2
+
+
+def test_parallel_paper_batch_yields_after_its_completion_quota(monkeypatch):
+    source = {"source_matrix_artifact_id": "matrix-1",
+              "papers": [paper(f"P{i}") for i in range(1, 5)],
+              "fact_agent_limits": {"paper_concurrency": 2}}
+    barrier, calls, snapshots = Barrier(2), [], []
+
+    def extract(_source, item, _previous, *, publish, retrieve):
+        paper_id = item["paper_id"]
+        calls.append(paper_id)
+        barrier.wait(timeout=3)
+        result = {"paper_id": paper_id, "status": "complete", "facts": []}
+        publish(paper_id, {"source_fingerprint": item["source_fingerprint"],
+                          "result": result, "agent_state": {}}, "completed", {})
+        return result
+
+    monkeypatch.setattr(PIPELINE, "extract_paper", extract)
+
+    def run(checkpoint):
+        return PIPELINE.enrich_papers(source, checkpoint,
+            save_checkpoint=lambda value: snapshots.append(deepcopy(value)),
+            save_progress=lambda _: None, retrieve=lambda _: [], max_new_papers=2)
+
+    assert [row["paper_id"] for row in run({})] == ["P1", "P2"]
+    assert set(calls) == {"P1", "P2"}
+    assert [row["paper_id"] for row in run(snapshots[-1])] == ["P1", "P2", "P3", "P4"]
+    assert sorted(calls) == ["P1", "P2", "P3", "P4"]
+
+
 def test_new_facts_check_ownership_once_and_reuse_audit_across_jobs(monkeypatch):
     item = paper("P1")
     item["required_fact_roles"] = ["object_input"]
@@ -158,15 +355,16 @@ def test_critical_or_inferential_quotes_keep_semantic_audit(monkeypatch, text):
     assert calls == ["matrix-facts-P1", "fact-verify-P1"]
 
 
-def test_extraction_ignores_unrequested_fields_without_changing_retrieval_registry(monkeypatch):
+def test_targeted_extraction_filters_unrequested_fields_without_changing_retrieval_registry(monkeypatch):
     item = paper("P1")
+    item["targeted_fact_roles_only"] = True
     item["evidence_candidates"].append({"evidence_key": "scope", "content_type": "text",
         "content": "UNREQUESTED SCOPE PASSAGE", "question_ids": ["scope"]})
     before = deepcopy(item)
     def model(prompt, **kwargs):
         if kwargs["required_list"] == "verdicts":
             return verify_response(prompt)
-        assert "UNREQUESTED SCOPE PASSAGE" not in prompt
+        assert 'Available fact fields: ["quantitative_results"]' in prompt
         return {**fact_response("P1"), "facts": [*fact_response("P1")["facts"],
             {"field_id": "scope", "value": "UNREQUESTED SCOPE PASSAGE", "support_excerpt": "UNREQUESTED SCOPE PASSAGE",
              "evidence_key": "scope", "confidence": 0.99}],
@@ -232,7 +430,7 @@ def test_targeted_request_scopes_extraction_without_inheriting_another_questions
     def model(prompt, **kwargs):
         calls.append(kwargs["label"])
         if kwargs["required_list"] == "verdicts": return verify_response(prompt)
-        assert 'Available fact fields for this review: ["quantitative_results"]' in prompt
+        assert 'Available fact fields: ["quantitative_results"]' in prompt
         return {"facts": [{"field_id": "quantitative_results", "value": "42% yield", "evidence_key": "control",
             "support_excerpt": source["content"], "confidence": 0.99}]}
     monkeypatch.setattr(PIPELINE, "call_json_model", model)

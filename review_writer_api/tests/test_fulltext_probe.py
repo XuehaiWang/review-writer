@@ -96,9 +96,11 @@ def test_service_only_checks_current_owned_candidates():
     service = DiscoveryService.__new__(DiscoveryService)
     row = {"candidate_id": "C1", "pdf_url": "https://example.org/a"}
     service._read_current = MagicMock(return_value=({"results": [{"web_results": [row]}]}, None))
-    with patch.object(p, "cached_check", return_value={"state": "available"}) as check:
+    # One request probes a whole batch, so the service delegates to the batched
+    # entry point instead of probing candidates one by one.
+    with patch.object(p, "cached_check_many", return_value={"C1": {"state": "available"}}) as check:
         assert service.check_fulltext("principal", "project", "C1")["state"] == "available"
-        check.assert_called_once_with(row)
+        check.assert_called_once_with({"C1": row})
         with pytest.raises(WorkflowNotFound):
             service.check_fulltext("principal", "project", "https://attacker.invalid/")
         assert check.call_count == 1

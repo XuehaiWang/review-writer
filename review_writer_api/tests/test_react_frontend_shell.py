@@ -105,7 +105,7 @@ class ReactFrontendShellTests(unittest.TestCase):
             / "frontend"
             / "src"
             / "features"
-            / "planning"
+            / "sections"
             / "ChapterPlanningWorkspace.tsx"
         ).read_text(encoding="utf-8")
         request = planning.split("const generateBlueprint", 1)[1].split(
@@ -123,8 +123,8 @@ class ReactFrontendShellTests(unittest.TestCase):
             / "images"
             / "ImagesPage.tsx"
         ).read_text(encoding="utf-8")
-        self.assertNotIn('/figures/review/confirm', images)
-        self.assertIn('/figures/review/sync', images)
+        self.assertNotIn('/images/review/confirm', images)
+        self.assertIn('/images/review/sync', images)
         self.assertIn('["figures", projectId]', images)
         self.assertIn("selection_complete", images)
 

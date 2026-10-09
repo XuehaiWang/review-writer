@@ -1,5 +1,4 @@
 import importlib.util
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +11,36 @@ def test_unknown_source_reference_is_not_accepted():
     with pytest.raises(ValueError, match="unknown source"):
         validate_revision_response({"reply": "Reason", "candidate_text": "Text", "source_refs": ["invented"]},
             {"evidence": [{"original_passages": [{"ref": "P1:b2"}]}]})
+
+
+@pytest.mark.parametrize("mode", ["question", "revision"])
+@pytest.mark.parametrize("refs,expected", [(["SABS-p1"], []), (["P1:b2", "invented", "P1:b2"], ["P1:b2"]), ("bad-format", [])])
+def test_author_dialogue_preserves_answer_and_proposal_without_reference_repair(tmp_path, monkeypatch, mode, refs, expected):
+    scripts = Path(__file__).resolve().parents[1] / "skills/review-first-draft-feedback-loop/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("author_refs_test", scripts / "revise_paragraph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    first = tmp_path / "04_first_draft"
+    first.mkdir()
+    (first / "first_draft.md").write_text("Original wording.", encoding="utf-8")
+    evidence = {"evidence": [{"paper_id": "P1", "original_passages": [{"ref": "P1:b2", "text": "Original source."}]}]}
+    candidate = "Clear wording." if mode == "revision" else None
+    with patch.object(module.loop, "parse_marked_paragraphs", return_value=[{"paragraph_id": "SABS-p1", "text": "Original wording."}]), \
+         patch.object(module.loop, "matrix_rows", return_value={}), \
+         patch.object(module.loop, "paragraph_metadata", return_value={}), \
+         patch.object(module.loop, "claim_evidence_contract", return_value={}), \
+         patch.object(module.loop, "source_evidence", return_value=evidence), \
+         patch.object(module.loop, "call_json_model", return_value={"reply": "Translated explanation", "candidate_text": candidate, "source_refs": refs}) as model:
+        result = module.revise(tmp_path, {"paragraph_id": "SABS-p1", "discussion_text": "Original wording.",
+            "section_context": {"paragraphs": []}, "routing": {"mode": mode}})
+    assert model.call_count == 1
+    assert result["reply"] == "Translated explanation"
+    assert result["candidate_text"] == (candidate or "")
+    assert result["source_refs"] == expected
+    assert not result["validation_errors"]
+    assert result["evidence_review"] == "references_unverified"
+    assert result["validation_warnings"] == ["unmatched_source_references"]
 
 
 def test_source_ref_correction_uses_only_retrieved_passages():
@@ -248,9 +277,33 @@ def test_question_routing_keeps_one_answer_and_explicit_related_reason(tmp_path,
     assert result["targets"] == ["S1-p1"]
     assert result["related"] == [{"paragraph_id": "S1-p2", "reason": "Explains the same claim"}]
     assert model.call_count == 1
-    with patch.object(module.loop, "call_json_model", return_value={"mode": "revision", "targets": ["foreign"]}):
-        with pytest.raises(ValueError, match="Invalid chapter evidence anchors"):
-            module.revise(tmp_path, request)
+    request["section_context"]["outline"] = [{"section_id": "S2", "locators": [{"paragraph_id": "S2-p3"}]}]
+    with patch.object(module.loop, "call_json_model", return_value={"mode": "question", "targets": ["S1-p1"],
+         "related": [{"paragraph_id": "S2-p3", "reason": "Compare the previous chapter ending"}]}) as model:
+        result = module.revise(tmp_path, request)["routing"]
+    assert result["related"][0]["paragraph_id"] == "S2-p3"
+    assert model.call_count == 1
+    with patch.object(module.loop, "call_json_model", return_value={"mode": "revision", "targets": ["foreign"]}) as model:
+        result = module.revise(tmp_path, request)["routing"]
+    assert result["targets"] == ["S1-p1"]
+    assert result["related"] == []
+    assert model.call_count == 1
+
+
+def test_question_routing_falls_back_to_normal_answer_without_evidence_anchors(tmp_path, monkeypatch):
+    scripts = Path(__file__).resolve().parents[1] / "skills/review-first-draft-feedback-loop/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("scope_fallback_test", scripts / "revise_paragraph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    request = {"route_only": True, "route_allowed_ids": ["S1-p1", "S1-p2"], "message": "what model are you?",
+        "section_context": {"paragraphs": [{"paragraph_id": "S1-p1"}, {"paragraph_id": "S1-p2"}]}}
+    with patch.object(module.loop, "call_json_model", return_value={"mode": "question", "targets": [], "related": []}) as model:
+        result = module.revise(tmp_path, request)["routing"]
+    assert result["targets"] == ["S1-p1"]
+    assert result["related"] == []
+    assert result["mode"] == "question"
+    assert model.call_count == 1
 
 
 def test_chapter_discussion_does_not_inherit_single_paragraph_scope():
@@ -265,6 +318,30 @@ def test_chapter_discussion_does_not_inherit_single_paragraph_scope():
     assert "Never ask the user to submit each" in prompt
     assert "revising ONE paragraph" not in prompt
     assert "Other paragraphs are read-only" not in prompt
+
+
+@pytest.mark.parametrize("mode", ["question", "revision"])
+def test_cross_chapter_sources_are_retrieved_in_discussion_and_revision(tmp_path, monkeypatch, mode):
+    scripts = Path(__file__).resolve().parents[1] / "skills/review-first-draft-feedback-loop/scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    spec = importlib.util.spec_from_file_location("cross_source_test", scripts / "revise_paragraph.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    first = tmp_path / "04_first_draft"
+    first.mkdir()
+    (first / "first_draft.md").write_text("Saved manuscript", encoding="utf-8")
+    paragraphs = [{"paragraph_id": "S1-p1", "text": "Current."}, {"paragraph_id": "S2-p3", "text": "Other ending."}]
+    with patch.object(module.loop, "parse_marked_paragraphs", return_value=paragraphs), \
+         patch.object(module.loop, "matrix_rows", return_value={}), \
+         patch.object(module.loop, "paragraph_metadata", return_value={}), \
+         patch.object(module.loop, "claim_evidence_contract", return_value={}), \
+         patch.object(module.loop, "source_evidence", return_value={"evidence": []}) as retrieval, \
+         patch.object(module.loop, "call_json_model", return_value={"reply": "Compare the two supplied passages", "candidate_text": None, "source_refs": []}) as model:
+        module.revise(tmp_path, {"paragraph_id": "S1-p1", "discussion_text": "Current.",
+            "section_context": {"paragraphs": [paragraphs[0]]},
+            "routing": {"mode": mode, "related": [{"paragraph_id": "S2-p3", "reason": "Compare endings"}]}})
+    assert [call.args[2]["paragraph_id"] for call in retrieval.call_args_list] == ["S1-p1", "S2-p3"]
+    assert model.call_count == 1
 
 
 def test_chapter_revision_keeps_worker_boundary_internal():

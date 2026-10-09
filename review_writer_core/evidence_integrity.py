@@ -6,6 +6,7 @@ import re
 import unicodedata
 import hashlib
 import html
+from html.parser import HTMLParser
 from typing import Any, Iterable
 
 
@@ -87,7 +88,10 @@ def _normalize_math_number_spacing(value: str) -> str:
     """
     def math(match):
         text = match.group(0)
-        unwrapped = _unwrap_scientific_text(text)
+        # An unescaped tilde inside TeX math is a nonbreaking space, not
+        # a missing digit or an approximate-value operator (\sim).
+        # Limit this view to the already delimited scalar; raw text stays intact.
+        unwrapped = _unwrap_scientific_text(re.sub(r"(?<!\\)~", " ", text))
         scalar = re.fullmatch(
             r"(?P<open>\$\$?|\\\(|\\\[)\s*(?P<number>[+-]?\d(?:[ \t]+\d){1,})(?P<unit>[ \t]*(?:"
             r"(?:\^\s*\{?\s*\\circ\s*\}?|°|\\degree)\s*[CK]\b|"
@@ -155,8 +159,97 @@ def _plain_scientific_markup(value: Any) -> str:
 def normalized_anchor_text(value: Any) -> str:
     text = _plain_scientific_markup(value).casefold()
     text = text.replace("−", "-").replace("–", "-").replace("—", "-")
-    text = re.sub(r"\b([ed])\.\s*([ed])\.", r"\1\2", text)
+    text = re.sub(r"\b([ed])\.\s*([edr])\.", r"\1\2", text)
+    # Do not fuse distinct numeric tokens, including an OCR fraction followed
+    # by an actual ratio. Valid split TeX scalars were normalized above.
+    text = re.sub(r"(?<=\d)\s+(?=\d)", "|", text)
     return re.sub(r"\s+", "", text)
+
+
+class _EvidenceTableRows(HTMLParser):
+    """Read explicit cells only; ambiguous merged columns are not inferred."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables, self.rows, self.row, self.cell = [], [], None, None
+        self.depth, self.ambiguous = 0, False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.depth += 1
+            if self.depth > 1:
+                self.ambiguous = True
+        elif self.depth and tag == "tr":
+            self.row = []
+        elif self.depth and tag in {"td", "th"}:
+            self.cell = []
+            if any(key in {"rowspan", "colspan"} and value != "1" for key, value in attrs):
+                self.ambiguous = True
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in {"td", "th"} and self.cell is not None:
+            if self.row is not None:
+                self.row.append("".join(self.cell))
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            self.rows.append(self.row)
+            self.row = None
+        elif tag == "table" and self.depth:
+            self.depth -= 1
+            if self.depth == 0:
+                self.finish_table()
+
+    def finish_table(self):
+        # A bounded source may end mid-row. Only already closed cells are
+        # retained; never complete a cut-off value or shift missing columns.
+        if self.row:
+            self.rows.append(self.row)
+        if not self.ambiguous:
+            self.tables.append(self.rows)
+        self.rows, self.row, self.cell = [], None, None
+        self.ambiguous = False
+
+
+def _table_metric_views(value: Any) -> list[str]:
+    """Comparison-only unit inheritance from an explicit table column header.
+
+    Never attach a percent to arbitrary numbers elsewhere in the passage or
+    infer a missing header. Keep source bytes/spans unchanged. Source semantics
+    (including experiment identity) still require the regular source check.
+    """
+    if "<table" not in str(value or "").lower():
+        return []
+    parser = _EvidenceTableRows()
+    # Alphabetic superscripts are table footnotes, not part of the scalar.
+    text = re.sub(r"<sup>\s*[a-z]+\s*</sup>", "", str(value or ""), flags=re.I)
+    parser.feed(text)
+    parser.finish_table()  # Completed rows in a bounded, truncated table are usable.
+    views = []
+    for rows in parser.tables:
+        headers = {}
+        for cells in rows:
+            found = {}
+            for index, cell in enumerate(cells):
+                head = _plain_scientific_markup(cell).strip()
+                metric = re.search(r"\b(yield|conversion|recovery|selectivity|ee|de)\b[^%/]{0,80}%", head, re.I)
+                metrics = re.findall(r"\b(?:yield|conversion|recovery|selectivity|ee|de)\b", head, re.I)
+                if metric and len(metrics) == 1 and "/" not in head[:metric.start()]:
+                    found[index] = metric.group(1).lower()
+            if found:
+                headers = found
+                continue
+            for index, metric in headers.items():
+                if index >= len(cells):
+                    continue
+                cell = re.sub(r"\^\s*(?:\{[a-z]+\}|[a-z]+)", "", cells[index], flags=re.I)
+                cell = _plain_scientific_markup(cell).strip()
+                scalar = re.match(r"^(\d+(?:\.\d+)?(?:\s*[–—-]\s*\d+(?:\.\d+)?)?)(?=$|[\s%/(])", cell)
+                if scalar:
+                    views.append(f"{scalar.group(1)}% {metric}")
+    return views
 
 
 def quantitative_anchors(value: Any) -> list[str]:
@@ -171,7 +264,11 @@ def quantitative_anchors(value: Any) -> list[str]:
 
 def _quantitative_anchor_supported(anchor: str, searchable: str) -> bool:
     normalized = normalized_anchor_text(anchor)
-    if normalized in searchable:
+    def contains(value):
+        # A value must not be a suffix/prefix of a different number (4%/34%,
+        # 1:1/1:10). Preserve this check for both raw and table-derived views.
+        return bool(re.search(r"(?<![\d.])" + re.escape(value) + r"(?!\d)", searchable))
+    if contains(normalized):
         return True
     # Metric prose frequently reverses value/metric order, e.g. ``94-99% de``
     # versus ``very high de (94-99%)`` or ``42% yield`` versus ``yield ... 42%``.
@@ -192,7 +289,7 @@ def _quantitative_anchor_supported(anchor: str, searchable: str) -> bool:
     return bool(
         numeric_parts
         and metric_parts
-        and all(part in searchable for part in numeric_parts)
+        and all(contains(part) for part in numeric_parts)
         and all(part in searchable for part in metric_parts)
     )
 
@@ -231,14 +328,16 @@ def unsupported_realization_anchors(
 ) -> dict[str, list[str]]:
     """Return realized numerical/entity anchors absent from cited chunks."""
 
-    searchable = normalized_anchor_text(
-        " ".join(str(value or "") for value in evidence_texts)
-    )
+    sources = [str(value or "") for value in evidence_texts]
+    searchable = normalized_anchor_text(" ".join(sources))
+    # Units inherit only within their own table, never from another source.
+    quantitative_searchable = searchable + "|" + normalized_anchor_text(
+        " ".join(view for source in sources for view in _table_metric_views(source)))
     return {
         "quantitative": [
             anchor
             for anchor in quantitative_anchors(realization)
-            if not _quantitative_anchor_supported(anchor, searchable)
+            if not _quantitative_anchor_supported(anchor, quantitative_searchable)
         ],
         "technical_entities": [
             anchor

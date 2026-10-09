@@ -8,6 +8,24 @@ from review_writer_core.evidence_integrity import source_contains_excerpt
 import pytest
 
 
+@pytest.mark.parametrize("ownership", [None, "own_results", "prior_work"])
+def test_binding_preserves_verified_fingerprint_and_legacy_omission(ownership):
+    from review_writer_core.scientific_facts import review_fingerprint, verification_matches
+    fact = {"paper_id": "P1", "field_id": "quantitative_results", "value": "91% yield",
+            "evidence_refs": [{"evidence_key": "a"}], "support_level": "direct",
+            "evidence_ceiling": "direct", "normalized_value": 91, "unit": "%"}
+    if ownership is not None:
+        fact["study_ownership"] = ownership
+    fact["verification"] = {"contract": FACT_VALIDATION_VERSION, "status": "supported",
+                            "input_fingerprint": review_fingerprint(fact)}
+    evidence = {}
+    attach_fact_to_evidence(evidence, fact)
+    binding = evidence["fact_bindings"][0]
+    assert verification_matches(binding)
+    assert ("study_ownership" in binding) == (ownership is not None)
+    assert binding.get("study_ownership") == ownership
+
+
 @pytest.mark.parametrize("source,fact,expected", [
     ("direct_source_report", "attributed_author_interpretation", "attributed_author_interpretation"),
     ("abstract_report_only", "direct_source_report", "abstract_report_only"),

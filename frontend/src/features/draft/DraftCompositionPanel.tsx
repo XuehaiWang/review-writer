@@ -13,7 +13,8 @@ type Candidate = { candidate_id: string; paragraph_key: string; original_text: s
 type StructureReference = { kind: "molecule" | "reaction"; label: string; name: string; smiles: string; role: string; conditions: string };
 type ImageVersion = { id: string; url: string; title: string; instructions: string; created_at: string; selected: boolean; source_changed: boolean; structure_references?: StructureReference[] };
 type Overview = { revision: number; draft_available?: boolean; draft_source_stale?: boolean; overview_figure_exists?: boolean; overview_text?: { title?: string }; history?: ImageVersion[]; job?: SynthesisJob };
-type Kind = "abstract" | "conclusion" | "overview";
+type Kind = "abstract" | "conclusion" | "overview" | "publication";
+type Publication = { revision: number; title?: string; authors?: string[]; affiliations?: string[] };
 
 export function DraftSynthesisStatus({ job, assembling = false }: { job?: SynthesisJob | null; assembling?: boolean }) {
   const { text } = useUiText();
@@ -46,11 +47,20 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
   const updateReference = (index: number, changes: Partial<StructureReference>) => setReferences(rows => rows.map((row, i) => i === index ? { ...row, ...changes } : row));
   const [caption, setCaption] = useState("");
   const [edited, setEdited] = useState("");
+  const [publicationAuthors, setPublicationAuthors] = useState("");
+  const [publicationAffiliations, setPublicationAffiliations] = useState("");
   const [notice, setNotice] = useLocalizedMessage();
   useEffect(() => { setReferences([]); setImageId(""); setInstructions(""); setCaption(""); }, [projectId]);
   const dialog = useRef<HTMLDialogElement>(null);
   const overview = useQuery({ queryKey: ["draft-overview", projectId], queryFn: () => apiRequest<Overview>(base + "/overview"),
     refetchInterval: q => jobIsActive(q.state.data?.job?.status) ? 3000 : false });
+  const publication = useQuery({ queryKey: ["draft-publication", projectId], queryFn: () => apiRequest<Publication>(base + "/publication"),
+    enabled: kind === "publication" });
+  useEffect(() => {
+    if (!publication.data) return;
+    setPublicationAuthors((publication.data.authors || []).join("\n"));
+    setPublicationAffiliations((publication.data.affiliations || []).join("\n"));
+  }, [publication.data]);
   useEffect(() => { if (captionOpen) setKind("overview"); }, [captionOpen]);
   useEffect(() => { if (kind) dialog.current?.showModal(); else dialog.current?.close(); }, [kind]);
   useEffect(() => {
@@ -77,14 +87,22 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
     if (!candidate) throw new Error(text("请先生成候选", "Generate a candidate first"));
     return apiRequest(base + "/synthesis-candidates/" + candidate.candidate_id + "/accept", { method: "POST", ...jsonBody({ text: edited, base_text_sha256: candidate.base_text_sha256 }) });
   }, onSuccess: async () => { setNotice(["已保存到正文", "Saved to manuscript"]); await refresh(); await overview.refetch(); } });
+  const publicationLines = (value: string) => value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const publicationDirty = Boolean(publication.data) && (publicationAuthors !== (publication.data?.authors || []).join("\n")
+    || publicationAffiliations !== (publication.data?.affiliations || []).join("\n"));
+  const savePublication = useMutation({ mutationFn: () => apiRequest(base + "/publication", { method: "PUT", ...jsonBody({
+    revision: publication.data!.revision, authors: publicationLines(publicationAuthors), affiliations: publicationLines(publicationAffiliations),
+  }) }), onSuccess: async () => { setNotice(["已保存出版信息", "Publication information saved"]); await refresh(); await client.invalidateQueries({ queryKey: ["final"] }); await publication.refetch(); } });
   const active = kind === "overview" ? overview.data?.job : job;
   const busy = run.isPending || jobIsActive(active?.status);
   const overviewBlocked = kind === "overview" && (overview.isPending || !!overview.error || overview.data?.draft_available === false || !!overview.data?.draft_source_stale);
   const cancel = useMutation({ mutationFn: () => apiRequest("/api/v1/jobs/" + active!.id + "/cancel", { method: "POST" }), onSuccess: async () => { await refresh(); await overview.refetch(); } });
-  const label = kind === "overview" ? text("总览图", "Overview") : kind === "abstract" ? text("摘要", "Abstract") : text("结论", "Conclusion");
+  const label = kind === "overview" ? text("总览图", "Overview") : kind === "abstract" ? text("摘要", "Abstract")
+    : kind === "publication" ? text("出版信息", "Publication information") : text("结论", "Conclusion");
   const open = (target: Kind) => { setNotice(""); run.reset(); save.reset(); cancel.reset(); setKind(target); if (target === "overview" && !selected && history[0]) chooseImage(history.find(v => v.selected) || history[0]); };
   const close = () => {
     if (candidate && edited !== candidate.candidate_text && !window.confirm(text("尚有未保存的文字修改，确定关闭？", "Discard unsaved text edits and close?"))) return;
+    if (kind === "publication" && publicationDirty && !window.confirm(text("尚有未保存的出版信息，确定关闭？", "Discard unsaved publication information and close?"))) return;
     setKind(null);
   };
   return <section className="draft-composition-panel" aria-label={text("完善正文", "Complete manuscript")}>
@@ -93,11 +111,17 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
       <button className="button button-quiet" type="button" disabled={!markdown} onClick={() => open("abstract")}>{text("摘要", "Abstract")}</button>
       <button className="button button-quiet" type="button" disabled={!markdown} onClick={() => open("conclusion")}>{text("结论", "Conclusion")}</button>
       <button className="button button-quiet" type="button" disabled={!markdown} onClick={() => open("overview")}>{text("总览图", "Overview")}</button>
+      <button className="button button-quiet" type="button" onClick={() => open("publication")}>{text("出版信息", "Publication information")}</button>
     </div>
     <dialog ref={dialog} className="draft-composition-dialog" aria-label={label} onCancel={e => { e.preventDefault(); close(); }}>
       {kind && <><header><h2>{label}</h2><button className="button button-quiet" onClick={close}>{text("关闭", "Close")}</button></header>
-        <p className="muted">{text("生成结果不会自动覆盖正文。关闭窗口不取消后台任务。", "Generation does not replace saved text. Closing this window does not cancel the task.")}</p>
-        {kind === "overview" ? <div className="draft-overview-workspace">
+        {kind !== "publication" ? <p className="muted">{text("生成结果不会自动覆盖正文。关闭窗口不取消后台任务。", "Generation does not replace saved text. Closing this window does not cancel the task.")}</p> : null}
+        {kind === "publication" ? <div className="draft-publication-form">
+          <p className="muted">{text("作者与单位用于终稿首页，可随时修改；正文文字仍在完整正文中编辑。", "Authors and affiliations feed the Final title page and can be edited anytime; prose stays in the manuscript.")}</p>
+          <label>{text("作者（每行一位）", "Authors (one per line)")}<textarea rows={4} value={publicationAuthors} onChange={e => setPublicationAuthors(e.target.value)} /></label>
+          <label>{text("单位（每行一个）", "Affiliations (one per line)")}<textarea rows={4} value={publicationAffiliations} onChange={e => setPublicationAffiliations(e.target.value)} /></label>
+          {publication.error ? <p role="alert"><LocalizedError error={publication.error} /></p> : null}
+        </div> : kind === "overview" ? <div className="draft-overview-workspace">
           <div className="draft-overview-preview">{selected ? <img src={selected.url} alt={text("总览图预览", "Overview preview")} /> : <p>{text("尚无总览图，在右侧填写要求后生成。", "No overview yet. Enter preferences and generate.")}</p>}</div>
           <aside><label>{text("本次生成要求（可选）", "Generation preferences (optional)")}<textarea rows={5} maxLength={4000} value={instructions} onChange={e => setInstructions(e.target.value)} /></label>
             <details className="overview-structure-references"><summary>{text("结构参考（可选）", "Structure references (optional)")}{references.length ? ` · ${references.length}` : ""}</summary>
@@ -125,10 +149,12 @@ export function DraftCompositionPanel({ projectId, markdown, job, refresh, candi
         {busy && <p role="status">{active?.status === "queued" ? text("排队中…", "Queued…") : text("正在生成，完成后将在此展示…", "Generating; the result will appear here…")}</p>}
         {notice && <p role="status">{notice}</p>}
         {active?.status === "failed" && <p role="alert">{active.error_message}</p>}
-        {(run.error || save.error || overview.error || cancel.error) && <p role="alert"><LocalizedError error={(run.error || save.error || overview.error || cancel.error)} /></p>}
-        <footer><button className="button button-secondary" disabled={busy || save.isPending || overviewBlocked} onClick={() => run.mutate(kind)}>{text("生成新版本", "Generate new version")}</button>
-          {jobIsActive(active?.status) && <button className="button button-quiet" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消生成", "Cancel generation")}</button>}
-          <button className="button button-primary" disabled={save.isPending || overviewBlocked || (kind === "overview" ? !selected || !caption.trim() : !candidate || !edited.trim())} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存到正文", "Save to manuscript")}</button></footer>
+        {(run.error || save.error || savePublication.error || overview.error || publication.error || cancel.error) && <p role="alert"><LocalizedError error={(run.error || save.error || savePublication.error || overview.error || publication.error || cancel.error)} /></p>}
+        <footer>{kind !== "publication" ? <button className="button button-secondary" disabled={busy || save.isPending || overviewBlocked} onClick={() => run.mutate(kind)}>{text("生成新版本", "Generate new version")}</button> : null}
+          {kind !== "publication" && jobIsActive(active?.status) ? <button className="button button-quiet" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消生成", "Cancel generation")}</button> : null}
+          {kind === "publication"
+            ? <button className="button button-primary" disabled={savePublication.isPending || !publication.data || !publicationDirty} onClick={() => savePublication.mutate()}>{savePublication.isPending ? text("保存中…", "Saving…") : text("保存出版信息", "Save publication information")}</button>
+            : <button className="button button-primary" disabled={save.isPending || overviewBlocked || (kind === "overview" ? !selected || !caption.trim() : !candidate || !edited.trim())} onClick={() => save.mutate()}>{save.isPending ? text("保存中…", "Saving…") : text("保存到正文", "Save to manuscript")}</button>}</footer>
       </>}
     </dialog>
   </section>;

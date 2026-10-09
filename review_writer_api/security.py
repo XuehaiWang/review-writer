@@ -57,6 +57,15 @@ class Principal:
             raise AuthorizationError(f"Permission required: {permission}")
 
 
+def bearer_token(authorization: str) -> str:
+    """Extract a Bearer credential from an Authorization header value."""
+    return (
+        authorization[7:].strip()
+        if authorization.casefold().startswith("bearer ")
+        else ""
+    )
+
+
 def local_owner_principal() -> Principal:
     """Trusted identity used only by the single-workspace local edition."""
     return Principal(

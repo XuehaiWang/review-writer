@@ -100,7 +100,8 @@ def test_initial_generation_only_conclusion_receives_compact_claims():
         if kwargs['label'] == 'draft-conclusion':
             assert 'CURRENT_CLAIM' in prompt
             assert 'EVIDENCE_SENTINEL' not in prompt
-            assert '2-3 connected paragraphs' in prompt
+            assert 'concise conclusion of this chemistry review' in prompt
+            assert 'Compress:' in prompt
             return {'text': 'New conclusion.'}
         assert 'EVIDENCE_SENTINEL' not in prompt
         assert 'CURRENT_CLAIM' not in prompt

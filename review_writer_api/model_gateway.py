@@ -46,6 +46,25 @@ from .workflow_models import WorkflowJob
 from review_writer_core.provider_errors import normalize_provider_error
 
 
+def text_provider_request(*, tier, runtime, prompt, response_format="json", idempotency_key):
+    """Build the hosted wire request once, also usable by isolated diagnostics.
+
+    Do not opt providers into JSON mode or reasoning/output limits implicitly.
+    Keep request construction separate from retries, metering and transport.
+    """
+    wire = tier.wire_api or runtime.wire_api
+    if wire in {"chat", "chat-completion", "chat-completions"}:
+        endpoint = f"{runtime.base_url}/chat/completions"
+        payload = {"model": tier.model, "messages": [{"role": "user", "content":
+            prompt + "\nReturn only one valid JSON object." if response_format == "json" else prompt}]}
+    else:
+        endpoint = f"{runtime.base_url}/responses"
+        payload = {"model": tier.model, "input": [{"role": "user", "content": prompt}]}
+    headers = {"Authorization": f"Bearer {runtime.api_key}", "Content-Type": "application/json",
+               "Accept": "application/json", "Idempotency-Key": idempotency_key}
+    return endpoint, payload, headers, wire
+
+
 class ModelGatewayError(RuntimeError):
     status_code = 502
 
@@ -109,7 +128,6 @@ TEXT_GATEWAY_JOB_TYPES = frozenset(
         "library.bibliography-audit",
         "matrix.enrich",
         "sections.generate",
-        "planning.reference-analyze",
         "planning.blueprint",
         "planning.topic-outline",
         "draft.evaluate",
@@ -851,31 +869,9 @@ class ModelGatewayService:
         runtime = self._text_runtime(tier)
         if not runtime.enabled:
             raise GatewayConfigurationError("The server text provider is not configured.")
-        wire = tier.wire_api or runtime.wire_api
-        if wire in {"chat", "chat-completion", "chat-completions"}:
-            endpoint = f"{runtime.base_url}/chat/completions"
-            payload = {
-                "model": tier.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": (
-                            prompt + "\nReturn only one valid JSON object."
-                            if response_format == "json"
-                            else prompt
-                        ),
-                    }
-                ],
-            }
-        else:
-            endpoint = f"{runtime.base_url}/responses"
-            payload = {"model": tier.model, "input": [{"role": "user", "content": prompt}]}
-        headers = {
-            "Authorization": f"Bearer {runtime.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Idempotency-Key": idempotency_key,
-        }
+        endpoint, payload, headers, wire = text_provider_request(
+            tier=tier, runtime=runtime, prompt=prompt,
+            response_format=response_format, idempotency_key=idempotency_key)
         stream_deadline = asyncio.get_running_loop().time() + (300 if stage == "overview-visual-brief" else 900)
         attempt_limit = 1 if stage == "overview-visual-brief" else 3
         for attempt in range(1, attempt_limit + 1):
@@ -931,7 +927,7 @@ class ModelGatewayService:
         body = {**payload, "stream": True}
         if chat:
             body["stream_options"] = {"include_usage": True}
-        text, usage, provider_id, finished = "", {}, "", False
+        text, usage, provider_id, finished, finish_reason = "", {}, "", False, ""
         last_update = last_check = 0.0
         published_length = 0
         started = asyncio.get_running_loop().time()
@@ -1007,6 +1003,7 @@ class ModelGatewayService:
                     usage = event.get("usage") or usage
                     for choice in event.get("choices") or []:
                         if choice.get("index", 0) == 0:
+                            finish_reason = str(choice.get("finish_reason") or finish_reason)
                             reasoning = reasoning or bool((choice.get("delta") or {}).get("reasoning_content") or (choice.get("delta") or {}).get("reasoning"))
                             delta = (choice.get("delta") or {}).get("content")
                             if isinstance(delta, str):
@@ -1033,6 +1030,12 @@ class ModelGatewayService:
                     last_update = asyncio.get_running_loop().time()
         if not finished or not chat:
             raise GatewayProviderError("Model stream ended before completion.")
+        if finish_reason in {"length", "max_tokens"}:
+            raise GatewayProviderError(
+                "Model provider stopped at its output limit before completing the answer.",
+                provider_error={"category": "output_limit", "code": "PROVIDER_OUTPUT_LIMIT",
+                                "provider_status": None, "retryable": False},
+            )
         await asyncio.to_thread(publish)
         return {"id": provider_id, "choices": [{"message": {"content": text}}], "usage": usage}
 

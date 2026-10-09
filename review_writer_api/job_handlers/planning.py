@@ -7,10 +7,72 @@ import os
 import sys
 from pathlib import Path
 
-from review_writer_api.errors import WorkflowError
+from review_writer_api.errors import WorkflowConflict, WorkflowError
 from review_writer_api.job_handlers.support import matrix_live_payload as _matrix_live_payload
 from review_writer_api.security import Principal, Role
 from review_writer_api.model_concurrency import text_parallelism
+from review_writer_core.fact_model_requests import fact_request_descriptor
+from review_writer_core.review_fact_readiness import REVIEW_READING_STRATEGY
+
+
+def _restore_matrix_model_requests(context, payload, checkpoint):
+    """Recover exact keys from owned pre-descriptor checkpoints, without submitting."""
+    papers = {str(paper.get("paper_id")): paper for paper in payload.get("papers") or []}
+    completed = set(checkpoint.get("completed_papers") or [])
+    parent_id = str(context.job_id)
+    for paper_id, entry in (checkpoint.get("entries") or {}).items():
+        paper = papers.get(paper_id)
+        if (not paper or paper_id in completed or not isinstance(entry, dict)
+                or not entry.get("source_fingerprint")
+                or entry["source_fingerprint"] != paper.get("source_fingerprint")):
+            continue
+        state = entry.get("agent_state")
+        if not isinstance(state, dict):
+            continue
+        pending = state.get("pending_model_request")
+        pending = pending if isinstance(pending, dict) else {}
+        attempt_id = str(state.get("attempt_id") or pending.get("parent_job_id") or "")
+        if attempt_id and attempt_id != parent_id:
+            # An explicit retry has a new parent and its own request namespace.
+            # Keep ready facts; never query the old parent using the new token.
+            state.pop("pending_model_request", None)
+            state.pop("waiting_model_job_ids", None)
+            continue
+        waiting = list(dict.fromkeys(state.get("waiting_model_job_ids") or []))
+        if not waiting:
+            continue
+        if len(waiting) != 1:
+            raise WorkflowConflict("The saved paper model request could not be identified safely.")
+        child = context.repository.get_job(context.user_id, str(waiting[0]))
+        submitted = child.payload if child is not None else {}
+        valid_stages = {
+            f"matrix-facts-{paper_id}"[:80], f"matrix-route-recheck-{paper_id}"[:80],
+            f"fact-verify-{paper_id}"[:96], f"fact-supplement-{paper_id}"[:96],
+        }
+        if (child is None or str(child.user_id) != str(context.user_id)
+                or str(child.project_id) != str(context.project_id)
+                or child.job_type != "model.dispatch"
+                or str(submitted.get("parent_job_id") or "") != parent_id
+                or submitted.get("stage") not in valid_stages
+                or submitted.get("response_format") != "json"
+                or not submitted.get("prompt") or not submitted.get("request_key")):
+            raise WorkflowConflict("The saved paper model request is unavailable or belongs to another task.")
+        state["pending_model_request"] = fact_request_descriptor(
+            submitted["prompt"], label=submitted["stage"],
+            request_key=submitted["request_key"], parent_job_id=parent_id,
+        )
+        if pending.get("request_key") == submitted["request_key"] and pending.get("counted"):
+            state["pending_model_request"]["counted"] = True
+        if (submitted["stage"] == f"matrix-facts-{paper_id}"[:80]
+                and paper.get("reading_strategy") == REVIEW_READING_STRATEGY
+                and not paper.get("verify_only") and not paper.get("targeted_fact_roles_only")
+                and submitted["prompt"].startswith(
+                    "Read the supplied source windows of one paper for a narrative review.\n")
+                and f"\nStrategy: {REVIEW_READING_STRATEGY};" in submitted["prompt"]):
+            # Preserve the paid call's original window selection across upgrades.
+            # The extractor revalidates intent and source bytes before reuse.
+            # This is transient Worker input, never copied into its checkpoint.
+            paper["pending_reading_prompt"] = submitted["prompt"]
 
 
 class PlanningJobHandlers:
@@ -130,12 +192,9 @@ class PlanningJobHandlers:
         staging = self._staging(context.user_id, context.job_id)
         payload["attempt_id"] = str(context.job_id)
         settings = getattr(getattr(self, "model_gateway", None), "settings", None)
-        global_slots = int(getattr(settings, "model_gateway_max_concurrency",
-                                   os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_CONCURRENCY", 2)))
-        user_slots = int(getattr(settings, "model_gateway_user_concurrency",
-                                 os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_USER_CONCURRENCY", 1)))
+        slots = text_parallelism(settings, getattr(getattr(self, "model_gateway", None), "session_factory", None))
         limits = dict(payload.get("fact_agent_limits") or {})
-        limits["paper_concurrency"] = max(1, min(3, global_slots, user_slots,
+        limits["paper_concurrency"] = max(1, min(3, slots,
                                                 int(limits.get("paper_concurrency", 3))))
         payload["fact_agent_limits"] = limits
         input_path = staging / "matrix-enrichment-input.json"
@@ -148,6 +207,7 @@ class PlanningJobHandlers:
         planning = getattr(self, "planning_service", None)
         resume_checkpoint = payload.get("resume_checkpoint")
         if isinstance(resume_checkpoint, dict):
+            _restore_matrix_model_requests(context, payload, resume_checkpoint)
             if planning is not None:
                 papers = {str(paper.get("paper_id")): paper for paper in payload.get("papers") or []}
                 for paper_id, entry in (resume_checkpoint.get("entries") or {}).items():
@@ -213,7 +273,7 @@ class PlanningJobHandlers:
                 "--checkpoint",
                 str(checkpoint_path),
                 "--max-new-papers",
-                "1",
+                str(limits["paper_concurrency"]),
                 *(["--evidence-request", str(request_path), "--evidence-response", str(response_path)]
                   if planning is not None else []),
             ],

@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import tempfile
-import time
 import unittest
 import uuid
 from copy import deepcopy
@@ -29,6 +28,7 @@ from review_writer_api.workflow_models import (
 )
 from review_writer_api.domain_services.planning import BLUEPRINT_LOGICAL_NAME
 from review_writer_api.domain_services.sections import _merge_evidence_registry_row
+from review_writer_api.tests._test_support import JobPollingMixin
 from review_writer_api.tests.planning_fixtures import seed_verified_matrix, offline_argument_planner
 from review_writer_core.claim_contracts import argument_projection
 from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
@@ -37,7 +37,7 @@ from review_writer_core.stages.sections.evidence_resolution import pending_markd
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 
 
-class SectionsV1Tests(unittest.TestCase):
+class SectionsV1Tests(JobPollingMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -526,15 +526,6 @@ class SectionsV1Tests(unittest.TestCase):
                 headers=self.headers(),
             )
             self.assertEqual(200, confirmed_blueprint.status_code, confirmed_blueprint.text)
-
-    def wait_job(self, client: TestClient, job_id: str) -> dict:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            payload = client.get(f"/api/v1/jobs/{job_id}").json()
-            if payload["status"] in {"succeeded", "failed", "cancelled", "interrupted"}:
-                return payload
-            time.sleep(0.02)
-        self.fail("Job did not finish.")
 
     def start(self, client: TestClient, key: str = "sections") -> dict:
         response = client.post(
@@ -1145,6 +1136,42 @@ class SectionsV1Tests(unittest.TestCase):
             all(len(plan["websearch_query"]) < 1000 for plan in section["query_plans"])
         )
 
+    def test_primary_paper_prior_work_facts_recover_own_body_passages(self) -> None:
+        self._seed_document_indexes()
+        with self.sessions.begin() as session:
+            index = session.query(LibraryDocumentIndex).filter_by(paper_id="P001").one()
+            for ordinal, page, heading, content in [
+                (1, 1, "Introduction", "Earlier copper allenation procedures used other substrates and products. " * 3),
+                (2, 2, "Results", "Our copper allenation of the selected substrate furnished the target allene under tested conditions. " * 2),
+                (3, 3, "Discussion", "The substrate scope of this copper allenation included several substitutions and one failed example. " * 2),
+                (4, 4, "References", "Copper allenation is mentioned in cited articles and previous methods. " * 3),
+            ]:
+                session.add(LibraryDocumentChunk(
+                    index_id=index.id, user_id=index.user_id, paper_id="P001",
+                    chunk_id=f"body-{ordinal}", ordinal=ordinal, content=content,
+                    normalized_content=content.casefold(), content_type="text",
+                    section_path_json=[heading], page_start=page, page_end=page,
+                    block_start=ordinal, block_end=ordinal, asset_refs_json=[], is_reference=False,
+                ))
+        service = self.app.state.sections_service
+        catalog = service._catalog(self.first, ["P001"])
+        task = {"section_id": "S01", "heading": "Target allene", "primary_papers": ["P001"],
+                "supporting_papers": [], "allowed_papers": ["P001"]}
+        prior_only = {"P001": {"paper_analysis": {"contribution": "Copper allenation furnished the target allene"},
+                               "scientific_facts": [{"study_ownership": "prior_work", "field_id": "scope",
+                                                     "value": "Earlier procedures were limited."}]}}
+        section = service._evidence_package(self.first, self.project_id, [task], catalog, prior_only)["sections"][0]
+        recovered = [hit for hit in section["hits"]
+                     if "primary_contribution_recovery" in hit["retrieval_passes"]]
+        self.assertEqual({2, 3}, {hit["page_start"] for hit in recovered})
+        self.assertTrue(all(hit["claim_eligible"] for hit in recovered))
+        with_own_fact = {"P001": {"scientific_facts": [{"study_ownership": "own_results",
+                         "field_id": "quantitative_results", "value": "The target allene was isolated.",
+                         "support_level": "direct", "evidence_refs": [{"evidence_key": "k"}]}]}}
+        section = service._evidence_package(self.first, self.project_id, [task], catalog, with_own_fact)["sections"][0]
+        self.assertFalse(any("primary_contribution_recovery" in hit["retrieval_passes"]
+                             for hit in section["hits"]))
+
     def test_relaxed_question_match_is_retained_as_claim_eligible_evidence(self) -> None:
         self._seed_document_indexes()
         with self.sessions.begin() as session:
@@ -1671,7 +1698,7 @@ class SectionsV1Tests(unittest.TestCase):
                 ],
                 "scientific_claims": [],
             },
-            review_topic="A scientific review",
+            review_topic="A chemistry review",
         )
 
         ids = {plan["question_id"] for plan in plans}

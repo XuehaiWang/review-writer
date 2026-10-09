@@ -6,7 +6,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from .workflow_contracts import public_stage_view
+from review_writer_core.taxonomy import public_taxonomy_profile_id
 
 from .auth import PASSWORD_MIN_LENGTH
 from review_writer_core.taxonomy import NEW_PROJECT_TAXONOMY_PROFILE
@@ -79,6 +81,28 @@ class ProjectResponse(BaseModel):
     discovery_status: str
     current_stage: str
     completed_stages: tuple[str, ...]
+    # ready | not_ready | unknown (artifact unreadable) | unchecked (list view)
+    outline_state: str = "unchecked"
+
+    @model_validator(mode="before")
+    @classmethod
+    def public_stage_contract(cls, value):
+        # The single place public stage values are produced, shared by list,
+        # read, create and update responses alike. Repositories retain
+        # checkpoint IDs for invalidation/approval; serialized public
+        # dictionaries are already converted.
+        if isinstance(value, (dict, cls)):
+            return value
+        data = {name: getattr(value, name, "unchecked") for name in cls.model_fields}
+        stage, completed = public_stage_view(
+            current_stage=data["current_stage"],
+            completed_checkpoints=tuple(data["completed_stages"]),
+            discovery_status=data["discovery_status"],
+        )
+        data["current_stage"] = stage
+        data["completed_stages"] = completed
+        data["taxonomy_profile"] = public_taxonomy_profile_id(data["taxonomy_profile"])
+        return data
 
 
 class ProjectListResponse(BaseModel):

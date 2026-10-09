@@ -11,7 +11,6 @@ from review_writer_core.draft_issue_routing import (
 )
 from review_writer_api.domain_services.actions.planning.blueprint import PlanningBlueprintActionsMixin
 from review_writer_api.errors import WorkflowConflict
-from review_writer_api.job_handlers.draft import DraftJobHandlers
 from review_writer_core.workflow.artifacts import DRAFT_MANUSCRIPT, DRAFT_QUALITY_REPORT, MATRIX
 
 

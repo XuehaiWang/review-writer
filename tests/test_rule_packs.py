@@ -8,6 +8,7 @@ from pathlib import Path
 from review_writer_core.stages.sections.rule_packs import (
     RulePackConfigurationError,
     load_rule_pack_text,
+    load_drafting_rule_pack_text,
     resolve_rule_pack,
     validate_blueprint_rule_pack,
 )
@@ -17,6 +18,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RulePackTests(unittest.TestCase):
+    def test_drafting_projection_keeps_blueprint_identity_and_excludes_templates(self):
+        for name in ("general", "allenation"):
+            selected = resolve_rule_pack(ROOT, name=name)
+            blueprint = {"rule_pack": name, "rule_pack_sha256": selected["sha256"]}
+            text = load_drafting_rule_pack_text(ROOT, blueprint)
+            self.assertIn("drafting-policy.md", text)
+            self.assertNotIn("default paragraph architecture", text)
+            self.assertNotIn("[yield", text)
+            self.assertEqual(selected, validate_blueprint_rule_pack(ROOT, blueprint))
+            self.assertIn("source", text.lower())
+            self.assertLess(len(text), 3500)
+            with self.assertRaises(RulePackConfigurationError):
+                load_drafting_rule_pack_text(ROOT, {**blueprint, "rule_pack_sha256": "stale"})
+
     def test_short_policies_remain_complete_and_release_budget_to_longer_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -33,6 +48,7 @@ class RulePackTests(unittest.TestCase):
             blueprint = {"rule_pack": "general", "rule_pack_sha256": selected["sha256"]}
             complete = "\n\n".join(f"<!-- rule source: {name} -->\nshort rule" for name in files)
             self.assertEqual(complete, load_rule_pack_text(root, blueprint, char_budget=len(complete)))
+            self.assertEqual(complete, load_drafting_rule_pack_text(root, blueprint))
             for name in files[1:]:
                 (folder / name).write_text("long rule " * 500, encoding="utf-8")
             selected = resolve_rule_pack(root)

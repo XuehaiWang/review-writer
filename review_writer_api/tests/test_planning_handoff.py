@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from review_writer_api.domain_services.actions.planning.blueprint import PlanningBlueprintActionsMixin
 from review_writer_api.errors import WorkflowConflict
 from review_writer_api.planning_jobs import queue_matrix_enrichment
+from review_writer_core.review_fact_readiness import REVIEW_READING_STRATEGY
 from review_writer_api.job_handlers.stage_execution import (
     register_planning_handlers,
     selected_formal_classification_contract,
@@ -139,6 +140,7 @@ class PlanningHandoffTests(TestCase):
         queue_matrix_enrichment(self.service, jobs, self.principal, "project")
         payload = jobs.submit.call_args.kwargs["payload"]
         self.assertTrue(payload["prepare_on_start"])
+        self.assertEqual(REVIEW_READING_STRATEGY, payload["reading_strategy"])
         self.service.matrix_enrichment_payload.assert_not_called()
         jobs.submit.reset_mock()
         self.job.status = "running"
@@ -170,11 +172,18 @@ class PlanningHandoffTests(TestCase):
         jobs.repository.get_current_job.return_value = self.job
         queue_matrix_enrichment(self.service, jobs, self.principal, "project", paper_ids=["P1"])
         self.assertEqual("previous", jobs.submit.call_args.kwargs["payload"]["resume_from_job_id"])
+        self.assertNotIn("reading_strategy", jobs.submit.call_args.kwargs["payload"])
         queue_matrix_enrichment(self.service, jobs, self.principal, "project", force=True)
         self.assertNotIn("resume_from_job_id", jobs.submit.call_args.kwargs["payload"])
+        self.assertEqual(REVIEW_READING_STRATEGY, jobs.submit.call_args.kwargs["payload"]["reading_strategy"])
+        self.job.payload["reading_strategy"] = REVIEW_READING_STRATEGY
+        queue_matrix_enrichment(self.service, jobs, self.principal, "project", paper_ids=["P1"])
+        self.assertEqual("previous", jobs.submit.call_args.kwargs["payload"]["resume_from_job_id"])
+        self.assertEqual(REVIEW_READING_STRATEGY, jobs.submit.call_args.kwargs["payload"]["reading_strategy"])
         self.job.payload = {"source_matrix_artifact_id": "older"}
         queue_matrix_enrichment(self.service, jobs, self.principal, "project")
         self.assertNotIn("resume_from_job_id", jobs.submit.call_args.kwargs["payload"])
+        self.assertEqual(REVIEW_READING_STRATEGY, jobs.submit.call_args.kwargs["payload"]["reading_strategy"])
 
     def test_worker_passes_queued_resume_checkpoint_to_builder(self):
         jobs, builder = Mock(), Mock()
@@ -192,6 +201,47 @@ class PlanningHandoffTests(TestCase):
         context.repository.get_job.assert_any_call("owner", "current")
         context.repository.get_job.assert_any_call("owner", "previous")
         self.assertEqual(checkpoint, builder.call_args.args[1]["resume_checkpoint"])
+
+    def test_revision_checkpoint_keeps_its_operation_through_queue_and_worker(self):
+        jobs, builder = Mock(), Mock()
+        checkpoint = {"source_matrix_artifact_id": "before", "entries": {"P1": {"result": {}}}}
+        self.service._matrix.return_value = ({}, SimpleNamespace(id="before"))
+        self.job.id = "original-revision"
+        self.job.status = "failed"
+        self.job.payload = {"prepare_on_start": True, "source_matrix_artifact_id": "before",
+                            "operation": "fact_revision"}
+        self.job.result = {"matrix_enrichment_checkpoint": checkpoint}
+        jobs.repository.get_current_job.return_value = self.job
+        original = deepcopy(self.job.payload)
+        queue_matrix_enrichment(self.service, jobs, self.principal, "project", paper_ids=["P1", "P2"])
+        request = jobs.submit.call_args.kwargs["payload"]
+        self.assertEqual("fact_revision", request["operation"])
+        self.assertEqual("original-revision", request["resume_from_job_id"])
+        self.assertEqual([], request["selected_paper_ids"])
+        self.assertNotIn("reading_strategy", request)
+        self.assertEqual(original, self.job.payload)
+
+        prepared = {"source_matrix_artifact_id": "before", "operation": "fact_revision",
+                    "pending_paper_count": 1, "fulltext_candidate_paper_count": 1,
+                    "papers": [{"paper_id": "P1", "evidence_candidates": [{"content": "Original source."}]}]}
+        self.service.fact_revision_payload.return_value = prepared
+        builder.return_value = {"papers": [{"paper_id": "P1"}]}
+        register_planning_handlers(self.service, jobs, {"matrix.enrich": builder})
+        handler = jobs.register_handler.call_args.args[1]
+        context = Mock(user_id="owner", project_id="project", job_id="current", retry_of_job_id=None)
+        context.repository.get_job.side_effect = lambda _uid, job_id: (
+            self.job if job_id == "original-revision" else SimpleNamespace(result={}))
+        handler(context, request)
+        self.service.matrix_enrichment_payload.assert_not_called()
+        self.assertEqual("fact_revision", builder.call_args.args[1]["operation"])
+        self.assertEqual(checkpoint, builder.call_args.args[1]["resume_checkpoint"])
+
+        queue_matrix_enrichment(self.service, jobs, self.principal, "project", paper_ids=["P2"], force=True)
+        fresh = jobs.submit.call_args.kwargs["payload"]
+        self.assertNotIn("operation", fresh)
+        self.assertNotIn("resume_from_job_id", fresh)
+        self.assertEqual(["P2"], fresh["selected_paper_ids"])
+        self.assertEqual(REVIEW_READING_STRATEGY, fresh["reading_strategy"])
 
     def test_worker_missing_sources_is_not_reported_as_success(self):
         jobs, builder = Mock(), Mock()

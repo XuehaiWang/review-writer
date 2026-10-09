@@ -4,8 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiRequest, jsonBody, newIdempotencyKey } from "../../api/client";
 import { ACTIVE_JOB_POLL_INTERVAL_MS } from "../../api/polling";
-import { libraryQuery, queryKeys } from "../../api/queries";
-import type { Job, LibraryPaper, UploadBatchSummary, UploadJob, UploadJobList } from "../../api/types";
+import { LIBRARY_PAGE_SIZE, libraryIndexProgressQuery, libraryQuery, queryKeys } from "../../api/queries";
+import type { BibliographyAuditResponse, Job, LibraryPaper, UploadBatchSummary, UploadJob, UploadJobList } from "../../api/types";
 import { ErrorState } from "../../components/ErrorState";
 import { ProjectSelector, useSelectedProject } from "../../components/ProjectSelector";
 import { useUiText } from "../../i18n/useUiText";
@@ -454,9 +454,13 @@ function AcquisitionPanel({ projectId, onLibraryChanged }: { projectId: string; 
 
 export function LibraryPage() {
   const { text } = useUiText();
+  const [openHeadingMenu, setOpenHeadingMenu] = useState<"import" | null>(null);
   const queryClient = useQueryClient();
   const { selected: project } = useSelectedProject();
   const [query, setQuery] = useState("");
+  // A growing window keeps already-loaded papers available to the detail pane and
+  // to the display labels, instead of replacing them page by page.
+  const [pageLimit, setPageLimit] = useState(LIBRARY_PAGE_SIZE);
   const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<DetailTab>("metadata");
   const [metadataDraft, setMetadataDraft] = useState<MetadataRecord | null>(null);
@@ -512,17 +516,31 @@ export function LibraryPage() {
     () => [...visibleLocalUploads, ...persistedUploads].filter((row) => row.batchId === currentUploadBatchId),
     [visibleLocalUploads, persistedUploads, currentUploadBatchId],
   );
-  const library = useQuery(libraryQuery(query));
-  const libraryIndex = useQuery(libraryQuery(""));
-  const semanticBackfill = libraryIndex.data?.semantic_backfill || library.data?.semantic_backfill;
+  const library = useQuery(libraryQuery(query, pageLimit));
+  // Library-wide indexing progress has its own light endpoint: the paper list is
+  // paged, so it can no longer report the whole library's backfill state.
+  const indexProgress = useQuery(libraryIndexProgressQuery());
+  const semanticBackfill = indexProgress.data?.semantic_backfill;
+  // Progress is read-only now, so the pending batch is committed explicitly, once
+  // per visit, instead of as a side effect of a poll.
+  const backfillStarted = useRef(false);
+  const startBackfill = useMutation({
+    mutationFn: () => apiRequest("/api/v1/library/index-progress/backfill", { method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() } }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.libraryIndexProgress }),
+  });
+  useEffect(() => {
+    if (backfillStarted.current || semanticBackfill?.status !== "pending") return;
+    backfillStarted.current = true;
+    startBackfill.mutate();
+  }, [semanticBackfill?.status]);
   const paperLabels = useMemo(
-    () => buildPaperDisplayLabels(libraryIndex.data?.items || library.data?.items || []),
-    [library.data?.items, libraryIndex.data?.items],
+    () => buildPaperDisplayLabels(library.data?.items || []),
+    [library.data?.items],
   );
   const refreshLibrary = useCallback(
     async () => {
-      const refreshes = [queryClient.invalidateQueries({ queryKey: queryKeys.library(""), exact: true })];
-      if (query) refreshes.push(queryClient.invalidateQueries({ queryKey: queryKeys.library(query), exact: true }));
+      const refreshes = [queryClient.invalidateQueries({ queryKey: queryKeys.library("") })];
+      if (query) refreshes.push(queryClient.invalidateQueries({ queryKey: queryKeys.library(query) }));
       refreshes.push(queryClient.invalidateQueries({ predicate: ({ queryKey }) => ["planning", "discovery", "sections", "figures", "draft", "final"].includes(String(queryKey[0])) }));
       await Promise.all(refreshes);
     },
@@ -552,9 +570,8 @@ export function LibraryPage() {
   }, [refreshLibrary, uploadJobs.data?.items]);
   const selectedPaper = useMemo(
     () => library.data?.items.find((paper) => paper.paper_id === selectedId)
-      || libraryIndex.data?.items.find((paper) => paper.paper_id === selectedId)
       || library.data?.items[0],
-    [library.data?.items, libraryIndex.data?.items, selectedId],
+    [library.data?.items, selectedId],
   );
   useEffect(() => {
     if (selectedPaper && selectedPaper.paper_id !== selectedId) setSelectedId(selectedPaper.paper_id);
@@ -568,6 +585,12 @@ export function LibraryPage() {
     queryKey: queryKeys.libraryMarkdown(selectedPaper?.paper_id || ""),
     queryFn: () => apiRequest<string>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/markdown`),
     enabled: Boolean(selectedPaper) && tab === "markdown",
+  });
+  const bibliographyAudit = useQuery({
+    queryKey: queryKeys.libraryBibliographyAudit(selectedPaper?.paper_id || ""),
+    queryFn: () => apiRequest<BibliographyAuditResponse>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/bibliography-audit`),
+    enabled: Boolean(selectedPaper) && tab === "metadata",
+    retry: false,
   });
   useEffect(() => {
     setMetadataDraft(null);
@@ -609,9 +632,9 @@ export function LibraryPage() {
     },
   });
   const reindexPaper = useMutation({
-    mutationFn: () => apiRequest<Job>(`/api/v1/library/papers/${encodeURIComponent(selectedPaper!.paper_id)}/reindex`, {
+    mutationFn: () => apiRequest<{ items: Job[]; count: number }>("/api/v1/library/reindex-jobs", {
       method: "POST",
-      headers: { "Idempotency-Key": newIdempotencyKey() },
+      ...jsonBody({ paper_ids: [selectedPaper!.paper_id], force: true }),
     }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["library"] });
@@ -720,7 +743,7 @@ export function LibraryPage() {
       <PreparationNotice kind="mineru" />
       <div className="workspace-heading">
         <div><p className="eyebrow">{text("阶段 1 · 共享文献集合", "Stage 1 · Shared source collection")}</p><h1>{text("文献库", "Literature library")}</h1><p className="muted">{text("上传PDF后必须完成MinerU解析，Metadata和正文才会供后续检索与写作使用。", "Uploaded PDFs must complete MinerU parsing before metadata and full text are available to later discovery and writing stages.")}</p></div>
-        <div className="library-heading-actions"><ProjectSelector /><details className="compact-advanced-menu"><summary className="button button-secondary">{text("高级维护", "Advanced maintenance")}</summary><div><button className="button button-secondary" type="button" disabled={reindexMissing.isPending} onClick={() => reindexMissing.mutate()}>{reindexMissing.isPending ? text("提交中…", "Submitting…") : text("补建缺失索引", "Build missing indexes")}</button></div></details><LibraryImportPicker busy={uploadSubmitting} onFiles={files => void uploadFiles(files)} onArchive={file => void uploadArchive(file)} /></div>
+        <div className="library-heading-actions"><ProjectSelector /><button className="button button-secondary" type="button" disabled={reindexMissing.isPending} onClick={() => reindexMissing.mutate()}>{reindexMissing.isPending ? text("提交中…", "Submitting…") : text("补建缺失索引", "Build missing indexes")}</button><LibraryImportPicker busy={uploadSubmitting} open={openHeadingMenu === "import"} onOpenChange={open => setOpenHeadingMenu(open ? "import" : null)} onFiles={files => void uploadFiles(files)} onArchive={file => void uploadArchive(file)} /></div>
       </div>
       {reindexMissing.error ? <p className="message message-error"><LocalizedError error={reindexMissing.error} /></p> : null}
       {archiveTransfer || currentArchive ? <section className="upload-progress-panel" aria-live="polite">
@@ -752,7 +775,7 @@ export function LibraryPage() {
       <AcquisitionPanel projectId={project?.project_id || ""} onLibraryChanged={refreshLibrary} />
       <div className="three-pane library-workspace">
         <section className="pane list-pane">
-          <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} <span aria-live="polite">{libraryIndex.data?.count ?? library.data?.count ?? 0}</span></h2></div></div>
+          <div className="pane-head"><div><span className="step-label">{text("论文", "Papers")}</span><h2>{text("文献", "Papers")} <span aria-live="polite">{library.data?.total ?? library.data?.count ?? 0}</span></h2></div></div>
           <input className="pane-search" type="search" value={query} onChange={(event) => { setQuery(event.target.value); setSelectedId(""); }} placeholder={text("检索标题、作者、关键词或正文", "Search title, author, keyword, or full text")} />
           <div className="list-pane-notices" aria-live="polite">
             {library.error ? <ErrorState error={library.error} onRetry={() => library.refetch()} /> : null}
@@ -781,6 +804,12 @@ export function LibraryPage() {
             ) : null}
           </div>
           <div className="paper-list">{library.data?.items.map((paper) => <PaperListItem key={paper.paper_id} paper={paper} displayLabel={paperLabels.get(paper.paper_id) || paper.paper_id} selected={paper.paper_id === selectedPaper?.paper_id} onSelect={() => setSelectedId(paper.paper_id)} />)}</div>
+          {library.data?.has_more ? <button className="button button-secondary button-block" type="button" disabled={library.isFetching}
+            onClick={() => setPageLimit(current => current + LIBRARY_PAGE_SIZE)}>
+            {library.isFetching
+              ? text("正在加载…", "Loading…")
+              : text(`加载更多（已显示 ${library.data.items.length} / ${library.data.total ?? "?"}）`, `Load more (${library.data.items.length} of ${library.data.total ?? "?"} shown)`)}
+          </button> : null}
         </section>
         <section className="pane detail-pane">
           {selectedPaper ? (
@@ -802,6 +831,7 @@ export function LibraryPage() {
                   reextracting={reextractAbstract.isPending}
                   reextractResult={abstractReextractResult}
                   error={saveMetadata.error || markReviewed.error || reextractAbstract.error}
+                  manualReviewConflicts={bibliographyAudit.data?.audit?.manual_review_conflicts || []}
                   onChange={setMetadataDraft}
                   onSave={() => saveMetadata.mutate({ paperId: selectedPaper.paper_id, value: metadataForSave(metadataDraft) })}
                   onReview={() => markReviewed.mutate({ paperId: selectedPaper.paper_id, value: metadataForSave(metadataDraft) })}

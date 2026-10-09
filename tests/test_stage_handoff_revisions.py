@@ -140,7 +140,7 @@ def test_edit_verification_publish_uses_only_changed_facts(matrix_env, tmp_path,
     env, service = matrix_env
     saved = edit(env, service)
     assert saved["row"]["fact_enrichment"]["status"] == "pending"
-    payload = service.matrix_enrichment_payload(env.first, env.project_id)
+    payload = service.fact_revision_payload(env.first, env.project_id)
     assert payload["operation"] == "fact_revision"
     targets = payload["papers"][0]["revision_facts"]
     assert len(payload["papers"]) == len(targets) == 1
@@ -162,7 +162,7 @@ def test_edit_verification_publish_uses_only_changed_facts(matrix_env, tmp_path,
 def test_old_verdict_cannot_overwrite_second_edit(matrix_env):
     env, service = matrix_env
     edit(env, service)
-    payload = service.matrix_enrichment_payload(env.first, env.project_id)
+    payload = service.fact_revision_payload(env.first, env.project_id)
     edit(env, service, "The study reports a product yield of 91%.")
     with pytest.raises(WorkflowConflict):
         service.publish_matrix_enrichment(env.first, env.project_id, payload, {})
@@ -171,12 +171,20 @@ def test_old_verdict_cannot_overwrite_second_edit(matrix_env):
 def test_unavailable_verifier_does_not_restore_old_supported_status(matrix_env, tmp_path, monkeypatch):
     env, service = matrix_env
     edit(env, service)
-    payload = service.matrix_enrichment_payload(env.first, env.project_id)
+    payload = service.fact_revision_payload(env.first, env.project_id)
     result = run_revision(payload, tmp_path, monkeypatch, Mock(side_effect=RuntimeError("offline")))
     service.publish_matrix_enrichment(env.first, env.project_id, payload, result)
-    retry = service.matrix_enrichment_payload(env.first, env.project_id)
+    retry = service.fact_revision_payload(env.first, env.project_id)
     assert retry["operation"] == "fact_revision"
     assert fact_usage(retry["papers"][0]["revision_facts"][0]) == "unusable"
+
+
+def test_legacy_unscoped_analysis_preserves_revision_dispatch(matrix_env):
+    env, service = matrix_env
+    edit(env, service)
+    payload = service.matrix_enrichment_payload(env.first, env.project_id, reading_strategy=None)
+    assert payload["operation"] == "fact_revision"
+    assert [paper["paper_id"] for paper in payload["papers"]] == ["P001"]
 
 
 def test_router_construction_no_longer_registers_stage_jobs():
@@ -223,7 +231,7 @@ def test_rejected_classification_is_not_counted_as_a_scientific_fact():
 def test_tampered_review_or_duplicate_fact_ids_cannot_publish(matrix_env):
     env, service = matrix_env
     edit(env, service)
-    payload = service.matrix_enrichment_payload(env.first, env.project_id)
+    payload = service.fact_revision_payload(env.first, env.project_id)
     reviewed = deepcopy(payload["papers"][0]["revision_facts"])
     reviewed[0]["value"] = "An unrelated experiment worked."
     with pytest.raises(WorkflowConflict):
@@ -239,11 +247,11 @@ def test_tampered_review_or_duplicate_fact_ids_cannot_publish(matrix_env):
 def test_changed_registered_context_invalidates_revision_checkpoint(matrix_env):
     env, service = matrix_env
     edit(env, service)
-    before = service.matrix_enrichment_payload(env.first, env.project_id)
+    before = service.fact_revision_payload(env.first, env.project_id)
     original = service.library_index.resolve_source_chunks
     service.library_index.resolve_source_chunks = lambda *args, **kwargs: [
         {**row, "content": row["content"] + " Additional experiment context."} for row in original(*args, **kwargs)]
-    after = service.matrix_enrichment_payload(env.first, env.project_id)
+    after = service.fact_revision_payload(env.first, env.project_id)
     assert before["papers"][0]["source_fingerprint"] != after["papers"][0]["source_fingerprint"]
 
 

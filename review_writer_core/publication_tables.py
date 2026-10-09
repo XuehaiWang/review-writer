@@ -517,14 +517,22 @@ def _result_with_units(result, units):
         return result if units.casefold() in result.casefold() else f"{result}; {units}"
     tokens = re.findall(r"%|[A-Za-z°µμ]+", units)
     present = set(re.findall(r"%|[a-z°µμ]+", result.casefold()))
+    # A legacy units field must not relabel a typed outcome (e.g. ee/de as
+    # yield). Preserve the already stated metric; never infer a conversion.
+    metrics = {"yield", "conversion", "ee", "de", "dr", "er", "accuracy", "precision", "recall", "auc"}
+    if present & metrics and set(token.casefold() for token in tokens) & metrics:
+        return result
     missing = [token for token in tokens if token.casefold() not in present]
     return " ".join([result, *missing])
 
 
 def _standalone_conditions(value):
     text = str(value or "").strip()
+    if re.fullmatch(r"(?:(?:under|using)\s+)?(?:the\s+)?(?:optimized|standard|same)\s+(?:reaction\s+)?conditions?\.?", text, re.I):
+        return ""
     # Source-local pointers are provenance, not readable experimental conditions.
-    text = re.sub(r"\b(?:entry|table|scheme|figure)\s+[A-Za-z]?\d+[A-Za-z]?\b", "", text, flags=re.I)
+    text = re.sub(r"\b(?:entries|entry|tables?|schemes?|figures?)\s+[A-Za-z]?\d+[A-Za-z]?"
+                  r"(?:\s*(?:,|and|or|[-–])\s*[A-Za-z]?\d+[A-Za-z]?)*\b", "", text, flags=re.I)
     text = re.sub(r"\bconditions?\s+[A-Z]\b", "", text)
     text = re.sub(r"\b(?:(?:under|using)\s+)?(?:the\s+)?same conditions?\b", "", text, flags=re.I)
     text = re.sub(r"^\s*(?:reaction in|in|under)\s*", "", text, flags=re.I)

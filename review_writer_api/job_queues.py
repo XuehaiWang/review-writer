@@ -18,6 +18,9 @@ INGEST_JOB_TYPES = frozenset(
         "library.semantic-backfill",
         "library.search",
         "library.download",
+        # Discovery owns acquiring its own candidates; the download machinery is
+        # reused, but the chain belongs to one stage.
+        "discovery.acquire",
     }
 )
 

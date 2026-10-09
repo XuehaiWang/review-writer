@@ -88,13 +88,35 @@ it("opens a local workspace without starting generation or navigating to batch",
       job={{ id: "j", status: "succeeded", result: { candidate_ids: ["c"] } }} />
   </QueryClientProvider>);
   await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/v1/projects/p/draft/overview"));
-  expect(screen.getAllByRole("button").map(b => b.textContent)).toEqual(["Abstract", "Conclusion", "Overview"]);
+  expect(screen.getAllByRole("button").map(b => b.textContent)).toEqual(["Abstract", "Conclusion", "Overview", "Publication information"]);
   expect(vi.mocked(apiRequest).mock.calls.every(([, opts]) => !opts?.method)).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Abstract" }));
   expect(vi.mocked(apiRequest).mock.calls.every(([, opts]) => !opts?.method)).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Generate new version" }));
   await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/v1/projects/p/draft/synthesis/abstract", expect.objectContaining({ method: "POST" })));
   expect(screen.queryByRole("link", { name: /view candidate/ })).not.toBeInTheDocument();
+});
+
+it("edits authors and affiliations through the draft publication window", async () => {
+  usePreferences.getState().setLanguage("en");
+  vi.mocked(apiRequest).mockImplementation(async (path, options) => {
+    if (path === "/api/v1/projects/p/draft/publication" && options?.method === "PUT") return { revision: 1 };
+    if (path === "/api/v1/projects/p/draft/overview") return { revision: 0, history: [] };
+    if (path === "/api/v1/projects/p/draft/publication") return { revision: 0, authors: ["Ada"], affiliations: ["ACME"] };
+    throw new Error(path);
+  });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <DraftCompositionPanel projectId="p" markdown="# Title" refresh={refresh} /></QueryClientProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "Publication information" }));
+  await waitFor(() => expect(screen.getByLabelText("Authors (one per line)")).toHaveValue("Ada"));
+  expect(screen.getByRole("button", { name: "Save publication information" })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText("Authors (one per line)"), { target: { value: "Ada\nGrace" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save publication information" }));
+  await waitFor(() => expect(apiRequest).toHaveBeenCalledWith("/api/v1/projects/p/draft/publication", expect.objectContaining({
+    method: "PUT", body: JSON.stringify({ revision: 0, authors: ["Ada", "Grace"], affiliations: ["ACME"] }),
+  })));
+  expect(vi.mocked(apiRequest).mock.calls.some(([url]) => url.endsWith("/synthesis/publication"))).toBe(false);
 });
 
 it("edits and accepts synthesis inside its window", async () => {

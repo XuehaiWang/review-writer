@@ -94,7 +94,7 @@ export function LandingPage({ authConfig, identity }: { authConfig: AuthConfig; 
           <Link className="button button-primary product-cta" to={workspaceHref}>{identity ? text("继续当前工作", "Continue your work") : text("登录工作台", "Sign in to workspace")}</Link>
         </section>
       </main>
-      <footer className="product-footer"><span>Review Writer</span><p>{text("证据驱动的科学综述工作台", "Evidence-grounded scientific review workspace")}</p></footer>
+      <footer className="product-footer"><span>Review Writer</span><p>{text("证据驱动的化学综述工作台", "Evidence-grounded chemistry review workspace")}</p></footer>
     </div>
   );
 }

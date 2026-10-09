@@ -32,9 +32,21 @@ describe("full-text access", () => {
     expect(screen.getByRole("link", { name: "打开原文" }).getAttribute("href")).toContain("doi.org");
     expect(screen.getByRole("link", { name: "上传 PDF" })).toBeInTheDocument();
   });
+  it("does not offer auto-import for a bare PDF link without a resolvable source", () => {
+    const row = { pdf_url: "https://example.org/paper.pdf" };
+    render(<FulltextAccess row={row} libraryUrl="/library" onDownload={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "尝试下载并解析" })).toBeNull();
+    expect(screen.getByRole("link", { name: "打开原文" })).toHaveAttribute("href", "https://example.org/paper.pdf");
+    expect(fulltextLabel(row, text)).toContain("打开核对");
+  });
   it("shows actionable failure and disables repeated active requests", () => {
     expect(fulltextHint({ fulltext_access: { state: "not_acquired", reason: "rate_limited" } }, text)).toContain("限流");
     render(<FulltextAccess row={{ doi: "10.1234/example" }} processing libraryUrl="/library" onDownload={vi.fn()} />);
     expect(screen.getByRole("button", { name: "处理中…" })).toBeDisabled();
+  });
+  it("explains why another acquisition button cannot be clicked yet", () => {
+    render(<FulltextAccess row={{ doi: "10.1234/example" }} disabled disabledReason="另一篇正在获取全文，请稍后再试。" libraryUrl="/library" onDownload={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "查找开放全文" })).toBeDisabled();
+    expect(screen.getByText("另一篇正在获取全文，请稍后再试。")).toBeInTheDocument();
   });
 });

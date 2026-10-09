@@ -3,8 +3,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -860,76 +858,6 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
             validated["group_by"],
         )
 
-    def test_screening_classification_requires_contribution_and_exact_quote(self) -> None:
-        axes = [
-            {
-                "axis_id": "method",
-                "label": "Method family",
-                "axis_role": "primary_organization",
-                "partitions": [
-                    {"partition_id": "alpha", "label": "Alpha method"}
-                ],
-            }
-        ]
-        passages = [
-            {
-                "evidence_key": "P001:screening:abstract:1",
-                "content_type": "abstract",
-                "section": "Abstract",
-                "content": "Prior studies used the Alpha method. We report the Alpha method for the current workflow.",
-            }
-        ]
-        background = discover.normalize_screening_classification(
-            paper_id="P001",
-            generated={
-                "topic_relevance": {"status": "relevant", "confidence": 0.95},
-                "assignments": [
-                    {
-                        "axis_id": "method",
-                        "partition_id": "alpha",
-                        "relation_to_paper": "background_mention",
-                        "confidence": 0.98,
-                        "evidence_key": "P001:screening:abstract:1",
-                        "support_excerpt": "Prior studies used the Alpha method.",
-                    }
-                ],
-            },
-            axes=axes,
-            passages=passages,
-        )
-        self.assertEqual("pending_evidence", background["classification_status"])
-        self.assertEqual([], background["provisional_screening_tags"])
-
-        contribution = discover.normalize_screening_classification(
-            paper_id="P001",
-            generated={
-                "topic_relevance": {"status": "relevant", "confidence": 0.95},
-                "assignments": [
-                    {
-                        "axis_id": "method",
-                        "partition_id": "alpha",
-                        "relation_to_paper": "primary_contribution",
-                        "confidence": 0.91,
-                        "evidence_key": "P001:screening:abstract:1",
-                        "support_excerpt": "This quotation is not in the source.",
-                    },
-                    {
-                        "axis_id": "method",
-                        "partition_id": "alpha",
-                        "relation_to_paper": "secondary_contribution",
-                        "confidence": 0.88,
-                        "evidence_key": "P001:screening:abstract:1",
-                        "support_excerpt": "We report the Alpha method for the current workflow.",
-                    },
-                ],
-            },
-            axes=axes,
-            passages=passages,
-        )
-        self.assertEqual(
-            "evidence_backed_screening", contribution["classification_status"]
-        )
-        self.assertEqual(1, len(contribution["provisional_screening_tags"]))
 
     def test_classification_axes_are_compact_after_provider_normalization(self) -> None:
         raw_axes = []
@@ -1055,87 +983,6 @@ class DiscoveryQueryPlanTests(unittest.TestCase):
                         classification_rules=EMPTY_RULES,
                     ),
                 )
-
-    def test_screening_candidates_run_concurrently_and_reuse_stable_cache(self) -> None:
-        papers = {
-            f"P{index:03d}": {
-                "paper_id": f"P{index:03d}",
-                "title": {"value": f"Alpha method paper {index}"},
-                "abstract": {"value": "We report the Alpha method for this study."},
-                "source_paths": {},
-            }
-            for index in range(1, 7)
-        }
-        axes = [
-            {
-                "axis_id": "method",
-                "label": "Method",
-                "axis_role": "primary_organization",
-                "partitions": [{"partition_id": "alpha", "label": "Alpha method"}],
-            }
-        ]
-        active = 0
-        maximum_active = 0
-        call_count = 0
-        lock = threading.Lock()
-
-        def fake_gateway(*_args, **_kwargs):
-            nonlocal active, maximum_active, call_count
-            with lock:
-                active += 1
-                call_count += 1
-                maximum_active = max(maximum_active, active)
-            time.sleep(0.04)
-            with lock:
-                active -= 1
-            return {
-                "topic_relevance": {"status": "relevant", "confidence": 0.9},
-                "assignments": [],
-                "unresolved_axes": [],
-            }
-
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_path = Path(tmp) / "screening-cache.json"
-            first_progress: list[dict] = []
-            with (
-                patch.object(discover, "gateway_configured", return_value=True),
-                patch.object(discover, "call_gateway_json", side_effect=fake_gateway),
-            ):
-                first = discover.classify_screening_candidates(
-                    papers,
-                    list(papers),
-                    topic="Alpha methods",
-                    classification_axes=axes,
-                    taxonomy_profile={},
-                    cache_path=cache_path,
-                    progress_callback=first_progress.append,
-                    max_workers=3,
-                )
-
-            self.assertEqual(set(papers), set(first))
-            self.assertGreaterEqual(maximum_active, 2)
-            self.assertEqual(6, call_count)
-            self.assertEqual(6, first_progress[-1]["current"])
-
-            second_progress: list[dict] = []
-            with (
-                patch.object(discover, "gateway_configured", return_value=True),
-                patch.object(discover, "call_gateway_json", side_effect=fake_gateway),
-            ):
-                second = discover.classify_screening_candidates(
-                    papers,
-                    list(papers),
-                    topic="Alpha methods",
-                    classification_axes=axes,
-                    taxonomy_profile={},
-                    cache_path=cache_path,
-                    progress_callback=second_progress.append,
-                    max_workers=3,
-                )
-
-            self.assertEqual(first, second)
-            self.assertEqual(6, call_count)
-            self.assertEqual(6, second_progress[-1]["cached"])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ from review_writer_core.draft_composition import replace_section, section_text, 
 
 
 class DraftCompositionTests(NativeFigureApiTestCase):
+    # Synthesis uses the isolated override below, never a live provider.
+    offline_text_provider_key = "test-placeholder-not-a-real-key"
     prepare_draft = test_drafts_v1.DraftsV1Tests.prepare_draft
 
     def extra_native_workflow_overrides(self):

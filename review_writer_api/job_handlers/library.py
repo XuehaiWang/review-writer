@@ -14,7 +14,16 @@ from review_writer_api.job_handlers.support import (
     literature_search_failure_message as _literature_search_failure_message,
 )
 from review_writer_api.scientific_runner import ScientificRunFailed
-from review_writer_core.bibliography_audit import audit_bibliography
+from review_writer_core.abstract_extraction import (
+    abstract_value,
+    build_opening_candidates,
+    recover_opening_abstract,
+)
+from review_writer_core.bibliography_audit import (
+    audit_bibliography,
+    bibliography_audit_reusable,
+    bibliography_input_fingerprint,
+)
 from review_writer_core.mineru_bibliography import (
     as_document_audit_extraction,
     extract_mineru_bibliography,
@@ -53,6 +62,23 @@ class LibraryJobHandlers:
 
         pdf_path = library_file(payload.get("pdf_relative_path"), "PDF")
         markdown_path = library_file(payload.get("markdown_relative_path"), "Markdown")
+        markdown_text = markdown_path.read_text(encoding="utf-8", errors="replace")
+        abstract_missing = not abstract_value(metadata.get("abstract"))
+        input_fingerprint = bibliography_input_fingerprint(metadata, markdown_text)
+        previous_audit = (
+            payload.get("previous_audit")
+            if isinstance(payload.get("previous_audit"), dict)
+            else {}
+        )
+        network_mode = str(payload.get("network_mode") or "fallback")
+        if bibliography_audit_reusable(
+            previous_audit, fingerprint=input_fingerprint, network_mode=network_mode
+        ):
+            # Identical document and canonical fields, unchanged rules: the
+            # previous verdict still holds, so no model request and no provider
+            # lookup are needed.
+            context.report_progress(6, 6)
+            return {**previous_audit, "reused": True}
         staging = self._staging(context.user_id, context.job_id)
         local_output = staging / "publication-date-extraction.json"
         normal, secrets = self._text_gateway_environment(context)
@@ -69,6 +95,7 @@ class LibraryJobHandlers:
                 str(markdown_path),
                 "--filename",
                 str(pdf_path.name),
+                *(["--abstract-missing"] if abstract_missing else []),
                 "--output",
                 str(local_output),
             ],
@@ -87,7 +114,18 @@ class LibraryJobHandlers:
                 "Bibliography audit local publication extraction is invalid."
             )
         context.report_progress(2, 6)
-        markdown_text = markdown_path.read_text(encoding="utf-8", errors="replace")
+        # Re-check the model's quoted spans against the owned source text before
+        # they can reach metadata; a quote that is not present is discarded.
+        opening_candidates = (
+            build_opening_candidates(
+                markdown_text, read_pdf_first_page_text(pdf_path)
+            )
+            if abstract_missing
+            else []
+        )
+        abstract_recovery = recover_opening_abstract(
+            local_extraction.get("abstract_recovery"), opening_candidates
+        )
         mineru_document_extraction = as_document_audit_extraction(
             extract_mineru_bibliography(
                 [],
@@ -185,7 +223,12 @@ class LibraryJobHandlers:
                 },
             }
         context.repository.update_job_progress(context.job_id, 6, 6)
-        return result
+        return {
+            **result,
+            "abstract_recovery": abstract_recovery,
+            "input_fingerprint": input_fingerprint,
+            "reused": False,
+        }
 
     def library_search(self, context, payload):
         staging = self._staging(context.user_id, context.job_id)

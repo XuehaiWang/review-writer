@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import ast
 import subprocess
 import unittest
 from pathlib import Path
@@ -10,6 +11,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryHygieneChecks(unittest.TestCase):
+    def test_retired_runtime_branches_are_not_reintroduced(self) -> None:
+        removed = {
+            "skills/review-figure-style-redraw/scripts/generate_overview_figure.py": {
+                "render_smiles_ball_and_stick", "_try_rdkit_3d", "build_3d", "_ai_redraw_gate",
+            },
+            "skills/review-topic-paper-discovery/scripts/discover.py": {
+                "classify_screening_candidates", "normalize_screening_classification",
+            },
+            "review_writer_api/domain_services/drafts.py": {"_incremental_quality", "_replace_scoped_rows"},
+            "skills/review-section-drafting-figure-picking/scripts/generate_section_drafts.py": {
+                "normalize_section_plan",
+            },
+        }
+        for relative, obsolete in removed.items():
+            with self.subTest(file=relative):
+                tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+                definitions = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+                self.assertFalse(definitions & obsolete)
+        self.assertFalse((ROOT / "review_writer_core/stages/sections/plan_repair.py").exists())
+
     def test_root_test_sources_are_not_hidden_by_blanket_ignore(self) -> None:
         result = subprocess.run(
             ["git", "check-ignore", "--no-index", "tests/future_cleanup_check.py"],

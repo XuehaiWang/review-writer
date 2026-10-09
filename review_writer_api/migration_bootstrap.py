@@ -13,7 +13,7 @@ from typing import Any
 from alembic import command
 from alembic.config import Config
 
-from review_writer_api.config import database_url_from_env
+from review_writer_api.config import _environment_flag, database_url_from_env
 from review_writer_api.database import create_session_factory, database_session
 from review_writer_api.workflow_migration import (
     MigrationInventory,
@@ -133,14 +133,10 @@ def run_legacy_migration(
 
 
 def _flag(name: str, default: bool = False) -> bool:
-    raw = str(os.environ.get(name) or "").strip().casefold()
-    if not raw:
-        return default
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    raise WorkflowMigrationError(f"{name} must be a boolean value.")
+    try:
+        return _environment_flag(name, default)
+    except ValueError as exc:
+        raise WorkflowMigrationError(str(exc)) from exc
 
 
 def main() -> int:

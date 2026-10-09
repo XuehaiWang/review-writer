@@ -3,7 +3,8 @@ import { Link, NavLink, useLocation } from "react-router-dom";
 
 import type { AuthConfig, Principal } from "../api/types";
 import { UserMenu } from "./UserMenu";
-import { translate, type MessageKey } from "../i18n/messages";
+import { translate } from "../i18n/messages";
+import { workflowLinks } from "../workflow";
 import { usePreferences } from "../state/preferences";
 
 type AppShellProps = {
@@ -11,16 +12,6 @@ type AppShellProps = {
   identity: Principal;
   children: React.ReactNode;
 };
-
-const workflowLinks: Array<{ href: string; label: MessageKey; stage: string; hintZh: string; hintEn: string }> = [
-  { href: "/library", label: "library", stage: "01", hintZh: "文献准备", hintEn: "Sources" },
-  { href: "/discovery", label: "discovery", stage: "02", hintZh: "文献筛选", hintEn: "Literature screening" },
-  { href: "/planning?view=reading", label: "planning", stage: "03", hintZh: "文献与大纲", hintEn: "Papers & outline" },
-  { href: "/sections", label: "sections", stage: "04", hintZh: "规划与正文", hintEn: "Plan & drafts" },
-  { href: "/images?tab=review", label: "images", stage: "05", hintZh: "选图重绘", hintEn: "Figures" },
-  { href: "/draft", label: "draft", stage: "06", hintZh: "编辑优化", hintEn: "Revision" },
-  { href: "/final", label: "final", stage: "07", hintZh: "审计导出", hintEn: "Release" },
-];
 
 function withCurrentProject(href: string, search: string): string {
   const project = new URLSearchParams(search).get("project");

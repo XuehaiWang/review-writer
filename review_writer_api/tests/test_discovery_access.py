@@ -53,9 +53,9 @@ def test_history_projection_is_scoped_latest_and_does_not_change_artifact(monkey
                 (other, project, "all_sources_failed"),
                 (user, str(uuid4()), "all_sources_failed"),
             ]):
-                session.add(WorkflowJob(user_id=owner, scope="library", job_type="library.download",
+                session.add(WorkflowJob(user_id=owner, scope="library", job_type="discovery.acquire",
                     status="succeeded", idempotency_key=str(index), created_at=now + timedelta(seconds=index),
-                    payload_json={"acquisition_project_id": pid, "candidates": [{"candidate_id": "C1"}]},
+                    payload_json={"project_id": pid, "candidates": [{"candidate_id": "C1"}]},
                     result_json={"results": [{"candidate_id": "C1", "status": outcome}]}))
         payload = {"results": [{"keyword": "test", "web_results": [{"candidate_id": "C1", "title": "Paper"}]}]}
         service = module.DiscoveryService.__new__(module.DiscoveryService)

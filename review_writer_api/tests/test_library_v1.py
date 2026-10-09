@@ -4,7 +4,6 @@ import base64
 import concurrent.futures
 import json
 import os
-import socket
 from dataclasses import replace
 import tempfile
 import time
@@ -38,6 +37,7 @@ from review_writer_api.domain_services.library import LibraryService
 from review_writer_api.errors import WorkflowValidationError
 from review_writer_api.scientific_runner import ScientificRunFailed
 from review_writer_api.security import Principal, Role
+from review_writer_api.tests._test_support import JobPollingMixin
 from review_writer_api.workflow_models import (
     LibraryArtifact,
     LibraryDocumentChunk,
@@ -55,7 +55,8 @@ def fake_pdf(seed: bytes = b"A") -> bytes:
     return b"%PDF-1.7\n" + seed * 700 + b"\n%%EOF\n"
 
 
-class LibraryV1Tests(unittest.TestCase):
+class LibraryV1Tests(JobPollingMixin, unittest.TestCase):
+    job_poll_timeout_seconds = 3.0
     def test_display_labels_follow_admission_not_metadata_edits(self) -> None:
         with TestClient(self.app) as client:
             first = self.upload(client, "first.pdf", fake_pdf(b"1")).json()["paper_id"]
@@ -293,15 +294,6 @@ class LibraryV1Tests(unittest.TestCase):
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
         self.temporary.cleanup()
-
-    def wait_job(self, client: TestClient, job_id: str) -> dict:
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            payload = client.get(f"/api/v1/jobs/{job_id}").json()
-            if payload["status"] in {"succeeded", "failed", "cancelled", "interrupted"}:
-                return payload
-            time.sleep(0.02)
-        self.fail("Job did not finish.")
 
     def upload(self, client: TestClient, filename: str, body: bytes):
         response = client.post(
@@ -874,7 +866,7 @@ class LibraryV1Tests(unittest.TestCase):
         self.assertEqual("pending", resumed["status"])
         self.assertEqual([paper_id], resumed["paper_ids"])
 
-    def test_library_query_automatically_submits_semantic_backfill_batch(self) -> None:
+    def test_index_progress_request_submits_a_semantic_backfill_batch(self) -> None:
         class EmbeddingProfile:
             @staticmethod
             def embedding_profile() -> dict[str, object]:
@@ -891,15 +883,37 @@ class LibraryV1Tests(unittest.TestCase):
             service = self.app.state.library_index_service
             service.vector_enabled = True
             service.embedding_profile_provider = EmbeddingProfile()
-            listing = client.get("/api/v1/library/papers")
+            # Reading progress is read-only; committing the batch is an explicit
+            # write, so a poll can never start work as a side effect.
+            listing = client.get("/api/v1/library/index-progress")
+            self.assertEqual(200, listing.status_code, listing.text)
+            self.assertTrue(listing.json()["semantic_backfill"]["enabled"])
+            started = client.post("/api/v1/library/index-progress/backfill")
+            self.assertEqual(202, started.status_code, started.text)
+            listing = client.get("/api/v1/library/index-progress")
 
         self.assertEqual(200, listing.status_code, listing.text)
         backfill = listing.json()["semantic_backfill"]
-        self.assertTrue(backfill["enabled"])
-        self.assertEqual(
-            "library.semantic-backfill", backfill["current_job"]["job_type"]
+        # The fixture is shared across the class, so the plan may already be
+        # finished, running, or waiting on credit by the time this runs. What
+        # must hold in every case: the read is a pure read, the POST is accepted
+        # as the explicit write, and a reported job is the semantic backfill.
+        self.assertIn(
+            backfill["status"],
+            {
+                "queued",
+                "running",
+                "succeeded",
+                "complete",
+                "pending",
+                "waiting_retry",
+                "blocked_credit",
+            },
         )
-        self.assertIn(backfill["status"], {"queued", "running", "succeeded"})
+        if backfill.get("current_job"):
+            self.assertEqual(
+                "library.semantic-backfill", backfill["current_job"]["job_type"]
+            )
 
     def test_semantic_embedding_credit_failure_is_sanitized_and_not_retryable_until_balance_changes(self) -> None:
         class InsufficientCreditGateway:

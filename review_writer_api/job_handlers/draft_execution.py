@@ -6,6 +6,8 @@ from review_writer_api.security import Principal, Role
 import uuid
 from review_writer_core.workflow.artifacts import DRAFT_REWRITE_CANDIDATES
 from review_writer_core.paragraph_revision import exact_hash
+from review_writer_core.chapter_dialogue_context import normalize_related, read_cross_chapter
+from review_writer_api.errors import WorkflowValidationError
 
 
 def register_draft_handlers(drafts_service, job_service, handlers):
@@ -25,6 +27,12 @@ def register_draft_handlers(drafts_service, job_service, handlers):
             coherence = coherence or ((previous.result or {}).get("coherence_plan") if previous else None)
         def report(values):
             context.report_partial_result({**values, "coherence_plan": coherence})
+        def finish():
+            snapshot = {"paragraph_results": results, "routing": routing, "coherence_plan": coherence}
+            if results and all(value.get("status") in {"failed", "skipped"} for value in results.values()):
+                report(snapshot)
+                raise WorkflowValidationError("No chapter response was completed. Your manuscript is unchanged; please retry.")
+            return snapshot
         if payload.get("manuscript_snapshot") and not coherence:
             # Reserve the attempt before dispatch; an interrupted unknown response must
             # not silently restart a paid global review on every paragraph yield.
@@ -48,7 +56,8 @@ def register_draft_handlers(drafts_service, job_service, handlers):
         if payload.get("section_context") and not routing:
             first = payload["paragraphs"][0]
             if payload.get("action") == "revise":
-                routing = {"mode": "revision", "targets": [p["paragraph_id"] for p in payload["paragraphs"]], "related": []}
+                routing = {"mode": "revision", "targets": [p["paragraph_id"] for p in payload["paragraphs"]],
+                    "related": normalize_related(payload.get("discussion_related", []), payload["section_context"])}
         if payload.get("section_context") and not routing:
             first = payload["paragraphs"][0]
             route_request, _ = drafts_service.dialogue_payload(principal, context.project_id, first["paragraph_key"],
@@ -77,7 +86,7 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                         "status": "completed", "outcome": "kept_original"})
         pending = [p for p in targets if p["paragraph_key"] not in results]
         if not pending:
-            return {"paragraph_results": results, "routing": routing, "coherence_plan": coherence}
+            return finish()
         target = pending[0]
         key = target["paragraph_key"]
         claimed = context.repository.paragraph_task_slot(context.user_id, context.project_id, key, context.job_id)
@@ -115,6 +124,16 @@ def register_draft_handlers(drafts_service, job_service, handlers):
                         section_context = dict(payload["section_context"])
                         # Read decisions afresh at execution time; HTTP submission may have waited in the queue.
                         sections = drafts_service.draft_dialogue_sections(principal, context.project_id)
+                        related = normalize_related(routing.get("related", []), section_context)
+                        cross_context, dependencies = read_cross_chapter(sections, payload.get("section_id"), related)
+                        section_context["cross_chapter_context"] = cross_context
+                        # Locator previews are for routing only; the answer receives selected full paragraphs.
+                        section_context["outline"] = [{k: v for k, v in s.items() if k != "locators"}
+                            for s in section_context.get("outline", [])]
+                        local_ids = {p["paragraph_id"] for p in section_context["paragraphs"]}
+                        one["dialogue"]["routing"] = {**routing, "related": [r for r in related
+                            if r["paragraph_id"] in local_ids or r["paragraph_id"] in dependencies]}
+                        one["dialogue"]["dependency_hashes"] = dependencies
                         section = next((s for s in sections if s["section_id"] == payload.get("section_id")), None)
                         if section:
                             history = drafts_service.section_dialogue_history(principal, context.project_id, section["section_id"])["turns"]
@@ -161,7 +180,7 @@ def register_draft_handlers(drafts_service, job_service, handlers):
         context.report_progress(len(results), len(targets))
         if len(results) < len(targets):
             raise JobYieldRequested()
-        return {"paragraph_results": results, "routing": routing, "coherence_plan": coherence}
+        return finish()
 
     def dispatch_revision(existing):
         def handler(context, payload):

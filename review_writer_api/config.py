@@ -90,6 +90,9 @@ class ApiSettings:
     internal_gateway_url: str = ""
     internal_worker_token: str = ""
     embedded_gateway_routes_enabled: bool = True
+    # Reader-facing condensed reaction quick-reference tables. Off keeps the
+    # legacy fact-comparison renderer for existing published output.
+    reaction_quickref_tables: bool = False
     model_gateway_max_concurrency: int = 4
     model_gateway_user_concurrency: int = 4
     text_job_max_provider_attempts: int = 1000
@@ -290,6 +293,9 @@ class ApiSettings:
         vector_retrieval_enabled = _environment_flag(
             "REVIEW_VECTOR_RETRIEVAL_ENABLED", False
         )
+        reaction_quickref_tables = _environment_flag(
+            "REVIEW_WRITER_REACTION_QUICKREF", False
+        )
         raw_workspace_root = str(
             os.environ.get("REVIEW_WRITER_HOSTED_WORKSPACE_ROOT") or ""
         ).strip()
@@ -383,6 +389,7 @@ class ApiSettings:
             internal_gateway_url=internal_gateway_url,
             internal_worker_token=internal_worker_token,
             embedded_gateway_routes_enabled=embedded_gateway_routes_enabled,
+            reaction_quickref_tables=reaction_quickref_tables,
             model_gateway_max_concurrency=model_gateway_max_concurrency,
             model_gateway_user_concurrency=model_gateway_user_concurrency,
             text_job_max_provider_attempts=_environment_integer(

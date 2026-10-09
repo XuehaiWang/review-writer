@@ -97,6 +97,17 @@ def test_pending_sections_never_enter_manuscript_and_parent_heading_is_emitted_o
     assert "### Adsorption" in markdown and "### Filtration" in markdown
 
 
+def test_scope_gap_is_not_converted_to_a_blank_section_writing_task():
+    blueprint = {"paper_assignment_policy": {"mode": "argument_based"},
+        "scope_coverage_gaps": [{"section_id": "S04", "title": "Conjugated enynes"}],
+        "sections": [
+            {"section_id": "S03", "title": "Propargylic alcohols", "section_role": "body", "primary_papers": ["P1"]},
+            {"section_id": "S04", "title": "Conjugated enynes", "section_role": "body", "primary_papers": []},
+        ]}
+    tasks = SectionsService.tasks_from_blueprint(blueprint)
+    assert [task["section_id"] for task in tasks] == ["S03"]
+
+
 @pytest.mark.parametrize("status,source,expected", [("approved", "bp", ["S2"]),
                                                      ("ready", "bp", ["S1", "S2"]),
                                                      ("approved", "older-bp", ["S1", "S2"])])

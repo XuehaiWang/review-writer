@@ -31,9 +31,12 @@ def caption_fields(row: dict) -> dict:
     original = clean(row.get("source_caption_text"))
     text = original
     method = "source_caption"
-    if "source_caption_missing" in normalize_publication_caption(original).quality_warnings:
-        recovered = clean(row.get("caption_source_text"))
-        if recovered and row.get("caption_source_ref"):
+    original_display = normalize_publication_caption(original)
+    recovered = clean(row.get("caption_source_text"))
+    if ("source_caption_missing" in original_display.quality_warnings
+            or original_display.word_count <= 4):
+        if (recovered and row.get("caption_source_ref")
+                and len(recovered.split()) > original_display.word_count):
             text, method = recovered, "source_figure_context"
     normalized = normalize_publication_caption(text,
         representative_role=row.get("representative_role"), source_label=row.get("source_label"))

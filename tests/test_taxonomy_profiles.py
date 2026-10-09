@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from review_writer_core.taxonomy import (
+    OFFERED_TAXONOMY_PROFILE_IDS,
     DEFAULT_TAXONOMY_PROFILE,
     TaxonomyConfigurationError,
     effective_taxonomy_profile,
@@ -33,8 +34,12 @@ class TaxonomyProfileTests(unittest.TestCase):
 
     def test_public_catalog_hides_topic_specific_profiles(self) -> None:
         profiles = {item["id"]: item for item in taxonomy_profile_catalog()}
-        self.assertEqual({"general_academic", "chemistry_general"}, set(profiles))
+        # The catalog is what the project form offers. ``general_academic`` is
+        # retired from that list for now; it remains a valid stored profile.
+        self.assertEqual({"chemistry_general"}, set(profiles))
         self.assertIs(True, profiles["chemistry_general"]["domain_rules_enabled"])
+        self.assertEqual("general_academic", validate_taxonomy_profile("general_academic"))
+        self.assertNotIn("general_academic", OFFERED_TAXONOMY_PROFILE_IDS)
 
     def test_topic_specific_profile_remains_internal_for_compatibility(self) -> None:
         self.assertEqual("allene", validate_taxonomy_profile("allene"))

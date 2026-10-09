@@ -36,6 +36,9 @@ def refresh_matrix_fact_summary(matrix):
                    source_not_established_count=readiness.count("source_not_established"),
                    needs_review_count=sum((row.get("fact_enrichment") or {}).get("review_status") == "needs_review" for row in rows),
                    evidence_backed_tag_paper_count=sum(bool(row.get("evidence_backed_tags")) for row in rows))
+    summary["reading_completed_count"] = sum(
+        (row.get("fact_enrichment", {}).get("processing") or {}).get("reading") == "completed"
+        for row in rows)
     for status in ("classified", "insufficient_evidence", "cross_category", "out_of_scope"):
         summary[f"topic_partition_{status}_count"] = sum(
             (row.get("topic_partition_classification") or {}).get("status") == status for row in rows)

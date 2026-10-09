@@ -5,7 +5,6 @@ import httpx2 as httpx
 import threading
 import uuid
 import zipfile
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -24,6 +23,8 @@ from review_writer_core.manuscript_state import build_manuscript_state
 
 
 class FinalV1Tests(NativeFigureApiTestCase):
+    offline_text_provider_key = "offline-final-fixture-not-a-real-key"
+
     def test_final_without_overview_ignores_orphan_caption_and_keeps_first_figure(self):
         from types import SimpleNamespace
         from unittest.mock import patch
@@ -854,6 +855,50 @@ class FinalV1Tests(NativeFigureApiTestCase):
         self.assertNotIn("**Keywords:**", current["final_draft_md"])
         self.assertFalse(stale["final_current"])
         self.assertTrue(stale["freshness"]["stale"])
+
+    def test_publication_metadata_is_editable_in_draft_before_approval(self) -> None:
+        with TestClient(self.app) as client:
+            self.confirm_review(client)
+            self.assertEqual(
+                "succeeded", self.start_redraw(client, "draft-publication-redraw")["status"]
+            )
+            figures = client.get(f"/api/v1/projects/{self.project_id}/figures").json()
+            self.assertEqual(
+                200,
+                client.post(
+                    f"/api/v1/projects/{self.project_id}/figures/confirm",
+                    json={"revision": figures["revision"]},
+                    headers=self.headers("draft-publication-figure-confirm"),
+                ).status_code,
+            )
+            assembled = client.post(
+                f"/api/v1/projects/{self.project_id}/draft/assemble",
+                headers=self.headers("draft-publication-assemble"),
+            )
+            self.assertEqual(200, assembled.status_code, assembled.text)
+            draft = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
+            self.assertFalse(draft["draft_approval_current"])
+            metadata = client.get(f"/api/v1/projects/{self.project_id}/draft/publication")
+            self.assertEqual(200, metadata.status_code, metadata.text)
+            self.assertEqual(["First"], metadata.json()["authors"])
+            saved = client.put(
+                f"/api/v1/projects/{self.project_id}/draft/publication",
+                json={
+                    "revision": metadata.json()["revision"],
+                    "authors": ["A. Researcher", "B. Researcher"],
+                    "affiliations": ["Institute of Verified Synthesis"],
+                },
+                headers=self.headers("draft-publication-save"),
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            reread = client.get(
+                f"/api/v1/projects/{self.project_id}/draft/publication"
+            ).json()
+            final = client.get(f"/api/v1/projects/{self.project_id}/final").json()
+        self.assertEqual(["A. Researcher", "B. Researcher"], reread["authors"])
+        self.assertEqual(["Institute of Verified Synthesis"], reread["affiliations"])
+        self.assertEqual(["A. Researcher", "B. Researcher"], final["front_matter"]["authors"])
+        self.assertEqual("user_modified", final["front_matter"]["field_states"]["authors"])
 
     def test_final_audit_warns_for_citation_issues_but_blocks_cross_project_artifacts(self) -> None:
         with self.sessions.begin() as session:

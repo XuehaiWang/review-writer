@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from review_writer_api.paper_labels import library_paper_labels
+from review_writer_core.abstract_extraction import abstract_value, recover_opening_abstract
 
 import base64
 import hashlib
@@ -21,11 +22,7 @@ from sqlalchemy import select
 
 from review_writer_api.artifact_service import ArtifactService
 from review_writer_api.domain_services.base import OwnedProjectService
-from review_writer_api.credentials import (
-    ProviderKind,
-    ProviderSettingsError,
-    ProviderSettingsService,
-)
+from review_writer_api.credentials import ProviderSettingsService
 from review_writer_api.domain_services.library_index import LibraryIndexService
 from review_writer_api.domain_services.actions.planning.blueprint import (
     PlanningBlueprintActionsMixin,
@@ -41,6 +38,7 @@ from review_writer_core.stages.planning.topic_recommendation import normalize_re
 from review_writer_api.database import database_session, utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
+    WorkflowError,
     WorkflowNotFound,
     WorkflowValidationError,
 )
@@ -49,6 +47,7 @@ from review_writer_api.job_service import job_payload as _planning_job_payload
 from review_writer_api.model_catalog import resolve_model_tier
 from review_writer_api.scientific_runner import (
     SENSITIVE_ENVIRONMENT_KEY,
+    ScientificRunError,
     ScientificRunner,
 )
 from review_writer_api.workflow_models import LibraryPaper, WorkflowJob
@@ -64,9 +63,19 @@ from review_writer_core.evidence_integrity import source_contains_excerpt
 from review_writer_core.claim_contracts import (
     FACT_GROUNDED_BLUEPRINT_SCHEMA_VERSION,
 )
+from review_writer_core.reference_outline import (
+    Heading,
+    extract_outline,
+    headings_from_docx,
+    headings_from_markdown,
+    headings_from_plain_text,
+    pdf_flat_text,
+    pdf_language_hint,
+    render_outline_markdown,
+)
 from review_writer_core.scientific_facts import (
-    FACT_PROMPT_VERSION, FACT_VALIDATION_VERSION, fact_is_usable, fact_support_spans,
-    fact_usage, merge_facts, normalize_assertion_ceiling,
+    FACT_PROMPT_VERSION, FACT_VALIDATION_VERSION, fact_display_signals, fact_is_usable,
+    fact_support_spans, fact_usage, merge_facts, normalize_assertion_ceiling,
     fact_needs_verification, review_fingerprint,
 )
 from review_writer_core.academic_contracts import (
@@ -91,10 +100,14 @@ from review_writer_core.evidence_queries import (
     boolean_query,
 )
 from review_writer_core.review_fact_readiness import (
+    DEFAULT_REVIEW_FACT_ROLES,
+    REVIEW_READING_STRATEGY,
     fact_readiness_report,
+    paper_reading_current,
     fact_processing_complete,
     fact_processing_state,
 )
+from review_writer_core.source_attribution import navigation_source_refs
 from review_writer_core.review_structure import (
     assign_primary_paper_sections,
     infer_section_role,
@@ -153,7 +166,6 @@ from review_writer_core.workflow.artifacts import (
     DISCOVERY_REVIEW as DISCOVERY_LOGICAL_NAME,
     MATRIX as MATRIX_LOGICAL_NAME,
     PLANNING_OUTLINE as OUTLINE_LOGICAL_NAME,
-    PLANNING_REFERENCE_OUTLINES as REFERENCE_INDEX_LOGICAL_NAME,
 )
 
 
@@ -162,8 +174,60 @@ CROSS_CATEGORY_BOUNDARY_LABEL = "Cross-category evidence and boundary cases"
 # Bump this whenever retrieval/query or source-validation semantics change.
 # It is part of every per-paper fingerprint, so previously cached facts are
 # re-extracted once under the new scientific contract.
-MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION = 12
+MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION = 13
 MATRIX_FACT_PROMPT_VERSION = FACT_PROMPT_VERSION
+
+# Polling views render status, progress and a few live counters. A job result
+# body can be very large (chapter planning embeds the whole Blueprint), so the
+# Planning payload forwards only the keys its views read.
+_PLANNING_JOB_RESULT_KEYS = frozenset(
+    {
+        "project_id",
+        "matrix_revision",
+        "blueprint_revision",
+        "planning_pipeline",
+        "blueprint_progress",
+        "integrated_fact_enrichment",
+        "matrix_enrichment_live",
+        "matrix_enrichment_progress",
+        "matrix_enrichment_checkpoint",
+        "candidate_pending",
+        "auto_applied",
+    }
+)
+
+
+# Row fields that only the paper detail view shows. Together they are ~86% of a
+# row (fact cards, comparison evidence) and are fetched per paper on demand, so
+# a paper list of hundreds of rows stays small enough to poll.
+_DETAIL_ONLY_ROW_KEYS = ("scientific_facts", "comparison_evidence", "paper_analysis")
+
+
+def _planning_list_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Return one matrix row as the paper list needs it.
+
+    ``facts_digest`` carries the two derived per-paper checks so the list still
+    reports the same status as a full-row computation.
+    """
+    light = {key: value for key, value in row.items() if key not in _DETAIL_ONLY_ROW_KEYS}
+    light["facts_digest"] = fact_display_signals(
+        row.get("scientific_facts"),
+        pending_revision_fact_ids=(row.get("fact_enrichment") or {}).get(
+            "pending_revision_fact_ids"
+        ),
+    )
+    return light
+
+
+def _planning_job_summary(job) -> dict[str, Any]:
+    """Return one job with only the result entries the Planning views use."""
+    payload = _planning_job_payload(job)
+    payload["result"] = {
+        key: value
+        for key, value in (job.result or {}).items()
+        if key in _PLANNING_JOB_RESULT_KEYS
+    }
+    return payload
 
 
 class PlanningService(
@@ -248,42 +312,6 @@ class PlanningService(
             row.result_json = dict(result or {})
             row.finished_at = utc_now()
 
-    def _begin_reference_gateway_job(
-        self, principal: Principal, project_id: str, candidate_id: str
-    ) -> SimpleNamespace:
-        return self._begin_gateway_job(
-            principal,
-            project_id,
-            job_type="planning.reference-analyze",
-            idempotency_key=candidate_id,
-            payload={"candidate_id": candidate_id},
-        )
-
-    def _finish_reference_gateway_job(
-        self, job_id: str, *, succeeded: bool, error_message: str = ""
-    ) -> None:
-        self._finish_gateway_job(
-            job_id,
-            succeeded=succeeded,
-            error_code="REFERENCE_ANALYSIS_FAILED",
-            error_message=error_message,
-        )
-
-    @staticmethod
-    def _reference_candidate_is_isolated(candidate: Any) -> bool:
-        if not isinstance(candidate, dict):
-            return False
-        firewall = candidate.get("content_firewall")
-        return bool(
-            candidate.get("analysis_mode") == "ai_style_only_transfer_v2"
-            and candidate.get("content_source") == "current_matrix_only"
-            and candidate.get("reference_content_reused") is False
-            and isinstance(firewall, dict)
-            and firewall.get("transfer_received_reference_text") is False
-            and firewall.get("all_heading_levels_content_source")
-            == "current_matrix_only"
-        )
-
     def _read_json(
         self,
         principal: Principal,
@@ -292,22 +320,13 @@ class PlanningService(
         *,
         required: bool = True,
     ) -> tuple[dict[str, Any] | None, ArtifactRecord | None]:
-        self._owned_project(principal, project_id)
-        artifact = self.repository.get_current_artifact(
-            principal.user_id, project_id, logical_name
+        return self._read_json_optional(
+            principal,
+            project_id,
+            logical_name,
+            required=required,
+            artifact_label="Planning",
         )
-        if artifact is None:
-            if required:
-                raise self._stage_not_ready(principal, project_id, logical_name)
-            return None, None
-        resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
-        try:
-            payload = json.loads(resolved.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise WorkflowConflict("The current Planning artifact is unreadable.") from exc
-        if not isinstance(payload, dict):
-            raise WorkflowConflict("The current Planning artifact is invalid.")
-        return payload, artifact
 
     def _publish_files(
         self,
@@ -371,7 +390,15 @@ class PlanningService(
         scientific facts and user Matrix edits continue to come from Matrix.
         """
 
-        updated = deepcopy(matrix)
+        # Copy only the containers this overlay writes to. The heavy per-row
+        # payload (scientific facts, comparison evidence) is never mutated here,
+        # so sharing it keeps the "do not mutate the caller's dict" contract
+        # without deep-copying the whole Matrix on every read.
+        updated = {**matrix}
+        if isinstance(matrix.get("rows"), list):
+            updated["rows"] = [
+                dict(row) if isinstance(row, dict) else row for row in matrix["rows"]
+            ]
         rows = [row for row in updated.get("rows") or [] if isinstance(row, dict)]
         paper_ids = [
             str(row.get("paper_id") or "")
@@ -467,11 +494,7 @@ class PlanningService(
 
     @staticmethod
     def _matrix_abstract(row: dict[str, Any]) -> str:
-        abstract = row.get("abstract")
-        if isinstance(abstract, dict):
-            abstract = abstract.get("value")
-        normalized = " ".join(str(abstract or "").split()).strip()
-        return "" if "unavailable or unreliable" in normalized.casefold() else normalized
+        return abstract_value(row.get('abstract'))
 
     def _user_fact_cache(
         self,
@@ -568,6 +591,23 @@ class PlanningService(
             for row in payload.get("rows") or []
             if isinstance(row, dict) and str(row.get("paper_id") or "")
         }
+    def _paper_reading_source_key(self, paper, source_lineages, summaries, catalog):
+        """Reading identity is source content/parse state, never review/model choice."""
+        paper_id = str(paper.get("paper_id") or "")
+        identity = {
+            "contract": "paper-reading-source/1", "paper_id": paper_id,
+            "sources": {sid: {
+                "source_lineage_hash": lineage,
+                "content_sha256": str(getattr(catalog.get(sid), "content_sha256", "") or ""),
+                "chunker_version": (summaries.get(sid) or {}).get("chunker_version") or "",
+                "parser_version": (summaries.get(sid) or {}).get("parser_version") or "",
+            } for sid, lineage in source_lineages.items()},
+            "abstract_sha256": (hashlib.sha256(self._matrix_abstract(paper).encode("utf-8")).hexdigest()
+                                if not source_lineages.get(paper_id) else ""),
+        }
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":")).encode("utf-8")).hexdigest()
+
     def matrix_enrichment_payload(
         self,
         principal: Principal,
@@ -577,6 +617,7 @@ class PlanningService(
         selected_paper_ids: list[str] | None = None,
         matrix_snapshot: dict[str, Any] | None = None,
         classification_contract_override: dict[str, Any] | None = None,
+        reading_strategy: str | None = REVIEW_READING_STRATEGY,
     ) -> dict[str, Any]:
         """Prepare source-addressable fact candidates for an asynchronous job."""
 
@@ -589,7 +630,8 @@ class PlanningService(
                 raise WorkflowConflict("Candidate Matrix must retain the selected paper set.")
             matrix = deepcopy(matrix_snapshot)
         from review_writer_core.stages.planning.fact_revision import pending_revisions
-        if selected_paper_ids is None and any(pending_revisions(row) for row in matrix.get("rows") or []):
+        if (reading_strategy != REVIEW_READING_STRATEGY and selected_paper_ids is None
+                and any(pending_revisions(row) for row in matrix.get("rows") or [])):
             return self.fact_revision_payload(principal, project_id, source_matrix_artifact_id=matrix_artifact.id)
         state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
         if state is None:
@@ -600,6 +642,15 @@ class PlanningService(
             if not selected <= {str(row.get("paper_id")) for row in rows}:
                 raise WorkflowValidationError("Fact repair requested papers outside the current Matrix.")
             rows = [row for row in rows if str(row.get("paper_id")) in selected]
+        # Scope and purpose are independent: selecting papers is not a request
+        # for the legacy extraction/classification/audit pipeline.
+        review_reading = reading_strategy == REVIEW_READING_STRATEGY
+        revision_inputs = {}
+        revision_ids = [str(row["paper_id"]) for row in rows if pending_revisions(row)] if review_reading else []
+        if revision_ids:
+            revisions = self.fact_revision_payload(principal, project_id,
+                source_matrix_artifact_id=matrix_artifact.id, selected_paper_ids=revision_ids)
+            revision_inputs = {paper["paper_id"]: paper for paper in revisions["papers"]}
         paper_ids = _paper_ids(rows)
         catalog = self._catalog(principal, paper_ids)
         supporting_parents = self._supporting_source_parents(catalog, paper_ids)
@@ -797,10 +848,16 @@ class PlanningService(
         prior_facts_by_paper = self._prior_matrix_facts(principal, matrix)
         for row in rows:
             paper_id = str(row.get("paper_id") or "")
+            if paper_id in revision_inputs:
+                # A human revision is verified, never re-extracted or skipped
+                # because this paper's initial reading is already complete.
+                papers.append({**revision_inputs[paper_id], "verify_only": True, "reading_strategy": ""})
+                continue
             summary = dict(summaries.get(paper_id) or {})
             lineage = str(summary.get("source_lineage_hash") or "")
             source_lineages = {source: str((summaries.get(source) or {}).get("source_lineage_hash") or "")
                                for source in [paper_id, *[key for key, parent in supporting_parents.items() if parent == paper_id]]}
+            reading_source_key = self._paper_reading_source_key(row, source_lineages, summaries, catalog)
             fingerprint_input = {
                 "schema_version": 2,
                 "fact_enrichment_contract_version": (
@@ -896,9 +953,15 @@ class PlanningService(
             existing = dict(row.get("fact_enrichment") or {})
             if (
                 not force
-                and (existing.get("last_attempt") or {}).get("status") != "failed"
-                and existing.get("source_fingerprint") == source_fingerprint
-                and fact_processing_complete(row.get("scientific_facts") or [], existing)
+                and (
+                    review_reading
+                    and (existing.get("fact_extraction_profile") or {}).get("reading_strategy") == REVIEW_READING_STRATEGY
+                    and paper_reading_current(row.get("scientific_facts") or [], existing, source_key=reading_source_key)
+                    or (not review_reading or (existing.get("fact_extraction_profile") or {}).get("reading_strategy") != REVIEW_READING_STRATEGY)
+                    and (existing.get("last_attempt") or {}).get("status") != "failed"
+                    and existing.get("source_fingerprint") == source_fingerprint
+                    and fact_processing_complete(row.get("scientific_facts") or [], existing)
+                )
             ):
                 continue
             plans = build_question_query_plans(
@@ -906,7 +969,9 @@ class PlanningService(
                 heading="",
                 core_argument=topic,
                 section_role="body",
-                required_fact_roles=topic_required_roles,
+                required_fact_roles=list(dict.fromkeys([
+                    *topic_required_roles, *DEFAULT_REVIEW_FACT_ROLES,
+                ])),
             )
             candidates: dict[str, dict[str, Any]] = {}
             partition_candidates: dict[str, dict[str, Any]] = {}
@@ -1061,6 +1126,56 @@ class PlanningService(
                         if retrieval_pass not in passes:
                             passes.append(retrieval_pass)
             coverage_seed_count = 0
+            contribution_seed_count = 0
+            if (
+                summary.get("fulltext") == "ready"
+                and self.library_index is not None
+                and callable(getattr(self.library_index, "primary_contribution_hits", None))
+                and not any(
+                    str(fact.get("study_ownership") or "") == "own_results"
+                    and fact_is_usable(fact)
+                    for fact in row.get("scientific_facts") or []
+                    if isinstance(fact, dict)
+                )
+            ):
+                contribution = str((row.get("paper_analysis") or {}).get("contribution") or row.get("title") or "")
+                contribution_seeds: dict[str, dict[str, Any]] = {}
+                for hit in self.library_index.primary_contribution_hits(
+                    principal, paper_id=paper_id, contribution=contribution, limit=2
+                ):
+                    if (
+                        hit.paper_id != paper_id
+                        or hit.source_lineage_hash != lineage
+                        or not _usable_fact_candidate(hit.content_type, hit.content)
+                    ):
+                        continue
+                    key = academic_evidence_key(hit.paper_id, hit.chunk_id, lineage)
+                    if key in candidates:
+                        passes = candidates[key].setdefault("retrieval_passes", [])
+                        if "primary_contribution_sample" not in passes:
+                            passes.append("primary_contribution_sample")
+                        continue
+                    contribution_seeds[key] = {
+                        "evidence_key": key, "paper_id": paper_id, "chunk_id": hit.chunk_id,
+                        "page_start": hit.page_start, "page_end": hit.page_end,
+                        "section_path": list(hit.section_path), "content_type": hit.content_type,
+                        "content": hit.content, "source_lineage_hash": lineage,
+                        "question_ids": [], "retrieval_passes": ["primary_contribution_sample"],
+                    }
+                contribution_seed_count = len(contribution_seeds)
+                # Put the bounded body sample before lexical hits so it survives
+                # the existing fact-extraction window budget. It is still only
+                # a source candidate; ownership is verified by the fact agent.
+                candidates = {**contribution_seeds, **candidates}
+            if (not candidates and summary.get("fulltext") == "ready" and self.library_index is not None
+                    and callable(getattr(self.library_index, "sample_document_context", None))):
+                for sampled in self.library_index.sample_document_context(
+                        principal, paper_id, expected_lineage=lineage):
+                    key = academic_evidence_key(paper_id, sampled["chunk_id"], lineage)
+                    candidates[key] = {**sampled, "evidence_key": key,
+                        "question_ids": list(topic_required_roles),
+                        "retrieval_passes": ["bounded_document_sample"], "claim_eligible": False}
+                    coverage_seed_count += 1
             if (not candidates and summary.get("fulltext") == "ready"
                     and self.library_index is not None and callable(getattr(self.library_index, "primary_coverage_hits", None))):
                 for hit in self.library_index.primary_coverage_hits(principal, allowed_papers=[paper_id], per_paper_limit=2):
@@ -1114,6 +1229,19 @@ class PlanningService(
                 and set(existing_roles) == set(topic_required_roles)
             )
             candidates.update(self.fact_source_candidates(principal, row, current_facts, source_lineages))
+            if review_reading:
+                candidates.update(self.fact_source_candidates(principal, row,
+                    [{"evidence_refs": navigation_source_refs(row)}], source_lineages))
+            if (review_reading and not abstract and summary.get('fulltext') == 'ready'
+                    and callable(getattr(self.library_index, 'sample_document_context', None))):
+                for sampled in self.library_index.sample_document_context(
+                        principal, paper_id, expected_lineage=lineage, limit=3, opening_only=True):
+                    key = academic_evidence_key(paper_id, sampled['chunk_id'], lineage)
+                    # Keep the original source identity/type. This is only an
+                    # opening candidate, not a synthetic abstract evidence chunk.
+                    candidate = candidates.setdefault(key, {**sampled, 'evidence_key': key,
+                        'question_ids': [], 'retrieval_passes': ['opening_context_sample']})
+                    candidate['opening_candidate'] = True
             reusable_candidates = set(candidates) | set(partition_candidates)
             cross_project_cache = dict(user_fact_cache.get(fact_cache_key) or {})
             fallback_facts_by_id: dict[str, dict[str, Any]] = {}
@@ -1156,6 +1284,8 @@ class PlanningService(
                     "source_fingerprint": source_fingerprint,
                     "fact_fingerprint": fact_fingerprint,
                     "fact_cache_key": fact_cache_key,
+                    **({"reading_strategy": REVIEW_READING_STRATEGY,
+                        "reading_source_key": reading_source_key} if review_reading else {}),
                     "taxonomy_profile": project.taxonomy_profile,
                     "required_fact_roles": topic_required_roles,
                     "existing_fact_result": ({
@@ -1178,6 +1308,7 @@ class PlanningService(
                     ),
                     "retrieval_summary": {
                         "coverage_seed_count": coverage_seed_count,
+                        "contribution_seed_count": contribution_seed_count,
                         "strict_question_hit_count": strict_question_hit_count,
                         "relaxed_question_hit_count": relaxed_question_hit_count,
                         "classification_query_count": len(
@@ -1196,6 +1327,10 @@ class PlanningService(
                     "reused_fact_cache": {
                         **cross_project_cache,
                         "facts": list(fallback_facts_by_id.values()),
+                        "prompt_version": (
+                            str((existing.get("fact_extraction_profile") or {}).get("prompt_version") or "")
+                            if fallback_facts_by_id else MATRIX_FACT_PROMPT_VERSION
+                        ),
                         "source_project_id": (
                             project_id
                             if fallback_facts_by_id
@@ -1222,6 +1357,7 @@ class PlanningService(
                 MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
             ),
             "force_refresh": bool(force),
+            **({"reading_strategy": REVIEW_READING_STRATEGY} if review_reading else {}),
             "project_id": project_id,
             "review_topic": topic,
             "required_fact_roles": topic_required_roles,
@@ -1255,7 +1391,8 @@ class PlanningService(
         paper_ids = [str(paper["paper_id"]) for paper in papers]
         catalog = self._catalog(principal, paper_ids)
         parents = self._supporting_source_parents(catalog, paper_ids)
-        summaries = self.library_index.summaries(principal, list(dict.fromkeys([*paper_ids, *parents])))
+        summaries = (self.library_index.summaries(principal, list(dict.fromkeys([*paper_ids, *parents])))
+                     if self.library_index is not None and self.library_index.enabled else {})
         for paper in papers:
             paper_id = str(paper["paper_id"])
             expected = paper.get("source_lineages") or {
@@ -1264,6 +1401,9 @@ class PlanningService(
                        for source in [paper_id, *[key for key, parent in parents.items() if parent == paper_id]]}
             if paper_id not in catalog or current != expected:
                 raise WorkflowConflict("The article or linked SI changed during fact extraction. The candidate was not published.")
+            if (paper.get("reading_strategy") == REVIEW_READING_STRATEGY
+                    and paper.get("reading_source_key") != self._paper_reading_source_key(paper, current, summaries, catalog)):
+                raise WorkflowConflict("The source content or parser changed during reading. The candidate was not published.")
         return summaries
 
     def retrieve_matrix_fact_evidence(
@@ -1397,6 +1537,9 @@ class PlanningService(
         if payload.get("operation") == "fact_revision":
             return self.publish_fact_revisions(principal, project_id, payload, built)
         matrix, matrix_artifact = self.validate_matrix_enrichment_inputs(principal, project_id, payload)
+        if (payload.get("reading_strategy") == REVIEW_READING_STRATEGY and payload.get("papers")
+                and (self.library_index is None or not self.library_index.enabled)):
+            self._validate_fact_sources(principal, payload["papers"])
         input_by_paper = {
             str(item.get("paper_id") or ""): item
             for item in payload.get("papers") or []
@@ -1441,6 +1584,9 @@ class PlanningService(
             result = built_by_paper.get(paper_id)
             if source is None or result is None:
                 continue
+            if source.get("verify_only") and source.get("revision_facts"):
+                self.apply_fact_revision_result(row, source, result)
+                continue
             candidates = {
                 str(item.get("evidence_key") or ""): item
                 for item in source.get("evidence_candidates") or []
@@ -1455,407 +1601,60 @@ class PlanningService(
                 if isinstance(item, dict) and item.get("evidence_key")
             }
             fact_candidates = {**partition_candidates, **candidates}
-            facts = []
-            for fact in result.get("facts") or []:
-                if not isinstance(fact, dict):
-                    continue
-                raw_refs = fact_support_spans(fact, fact_candidates)
-                if not raw_refs:
-                    continue
-                excerpt = " ".join(ref["support_excerpt"] for ref in raw_refs)
-                if not excerpt or not str(fact.get("value") or "").strip():
-                    continue
-                if not str(fact.get("evidence_ceiling") or "").strip():
-                    continue
-                field_id = str(fact.get("field_id") or "").casefold()
-                if field_id != "topic_partition" and field_id not in extraction_fact_field_ids(required_roles=topic_required_roles,
-                        evidence_candidates=list(fact_candidates.values())):
-                    continue
-                assertion_ceiling = normalize_assertion_ceiling(
-                    fact.get("assertion_ceiling")
-                )
-                facts.append(
-                    {
-                        **fact,
-                        "paper_id": paper_id,
-                        "support_level": "context_only" if fact.get("validation_contract") == FACT_VALIDATION_VERSION
-                            and (fact.get("verification") or {}).get("status") != "supported" else fact.get("support_level"),
-                        "assertion_ceiling": assertion_ceiling,
-                        "evidence_refs": raw_refs,
-                        "support_spans": raw_refs,
-                        "support_excerpt": excerpt,
-                    }
-                )
-                # Source registration may fill previously null metadata. Rebind
-                # only when the shared checker proves the old audit still fits.
-                if ((fact.get("verification") or {}).get("input_fingerprint")
-                        and not fact_needs_verification(fact)
-                        and not fact_needs_verification(facts[-1])):
-                    facts[-1]["verification"] = {**fact["verification"],
-                        "input_fingerprint": review_fingerprint(facts[-1])}
-            raw_classification = result.get("topic_partition_classification")
-            if not declared_partitions:
-                partition_classification = {
-                    "schema_version": 1,
-                    "status": "not_requested",
-                    "partition": "",
-                    "confidence": 0.0,
-                    "evidence_refs": [],
-                }
-            elif isinstance(raw_classification, dict):
-                status_value = str(
-                    raw_classification.get("status") or "insufficient_evidence"
-                ).casefold()
-                if status_value == "boundary":
-                    status_value = "insufficient_evidence"
-                canonical_partition = _canonical_declared_partition(
-                    raw_classification.get("partition"), declared_partitions
-                )
-                try:
-                    partition_confidence = max(
-                        0.0,
-                        min(
-                            1.0,
-                            float(raw_classification.get("confidence") or 0),
-                        ),
-                    )
-                except (TypeError, ValueError):
-                    partition_confidence = 0.0
-                partition_refs = [
-                    dict(ref)
-                    for ref in raw_classification.get("evidence_refs") or []
-                    if isinstance(ref, dict)
-                    and str(ref.get("evidence_key") or "") in partition_candidates
-                ]
-                support_excerpt = " ".join(
-                    str(raw_classification.get("support_excerpt") or "").split()
-                )
-                excerpt_valid = bool(
-                    support_excerpt
-                    and partition_refs
-                    and all(
-                        source_contains_excerpt(
-                            partition_candidates[
-                                str(ref.get("evidence_key") or "")
-                            ].get("content"),
-                            support_excerpt,
-                        )
-                        for ref in partition_refs
-                    )
-                )
-                classified = bool(
-                    status_value == "classified"
-                    and canonical_partition
-                    and partition_confidence >= 0.75
-                    and excerpt_valid
-                )
-                unresolved_status = (
-                    status_value
-                    if status_value
-                    in {"insufficient_evidence", "cross_category", "out_of_scope"}
-                    else "insufficient_evidence"
-                )
-                if unresolved_status in {"cross_category", "out_of_scope"} and not excerpt_valid:
-                    unresolved_status = "insufficient_evidence"
-                partition_classification = {
-                    "schema_version": 1,
-                    "status": "classified" if classified else unresolved_status,
-                    "partition": canonical_partition if classified else "",
-                    "candidate_partition": (
-                        canonical_partition
-                        if canonical_partition and not classified
-                        else ""
-                    ),
-                    "confidence": round(partition_confidence, 4),
-                    "rationale": str(
-                        raw_classification.get("rationale") or ""
-                    )[:800],
-                    "boundary_reason": (
-                        ""
-                        if classified
-                        else str(
-                            raw_classification.get("boundary_reason")
-                            or "The source-bound classification did not meet the evidence and confidence requirements."
-                        )[:800]
-                    ),
-                    "classification_reason": (
-                        ""
-                        if classified
-                        else str(
-                            raw_classification.get("classification_reason")
-                            or raw_classification.get("boundary_reason")
-                            or "The source-bound classification did not meet the evidence and confidence requirements."
-                        )[:800]
-                    ),
-                    "support_excerpt": support_excerpt if excerpt_valid else "",
-                    "evidence_ceiling": str(
-                        raw_classification.get("evidence_ceiling")
-                        or "Do not infer a contrasting partition from information absent in the cited passage."
-                    )[:600],
-                    "evidence_refs": partition_refs if excerpt_valid else [],
-                    "review_status": (
-                        "not_required" if classified else "needs_review"
-                    ),
-                    "extraction_method": "model_classified_from_bounded_source",
-                }
-            else:
-                partition_classification = {
-                    "schema_version": 1,
-                    "status": "insufficient_evidence",
-                    "partition": "",
-                    "confidence": 0.0,
-                    "evidence_refs": [],
-                    "boundary_reason": "The model returned no valid Topic-partition classification.",
-                    "review_status": "needs_review",
-                    "extraction_method": "model_classification_missing",
-                }
-            axis_contract = {
-                str(axis.get("axis_id") or ""): axis
-                for axis in payload.get("classification_axes") or []
-                if isinstance(axis, dict) and str(axis.get("axis_id") or "")
-            }
-            allowed_partitions = {
-                axis_id: {
-                    str(partition.get("partition_id") or "")
-                    for partition in axis.get("partitions") or []
-                    if isinstance(partition, dict)
-                    and str(partition.get("partition_id") or "")
-                }
-                for axis_id, axis in axis_contract.items()
-            }
+            review_reading = source.get("reading_strategy") == REVIEW_READING_STRATEGY
+            facts = self._validated_paper_facts(
+                row,
+                result,
+                fact_candidates=fact_candidates,
+                paper_id=paper_id,
+                review_reading=review_reading,
+                topic_required_roles=topic_required_roles,
+            )
+            partition_classification = self._paper_partition_classification(
+                result.get("topic_partition_classification"),
+                declared_partitions=declared_partitions,
+                partition_candidates=partition_candidates,
+            )
             facts_by_id = {
                 str(fact.get("fact_id") or ""): fact
                 for fact in facts
                 if str(fact.get("fact_id") or "")
             }
-            evidence_backed_tags: dict[str, list[dict[str, Any]]] = {}
-            raw_tags = result.get("evidence_backed_tags")
-            if isinstance(raw_tags, dict):
-                for axis_id, raw_values in raw_tags.items():
-                    axis_id = str(axis_id or "")
-                    if axis_id not in axis_contract or not isinstance(raw_values, list):
-                        continue
-                    for raw_tag in raw_values:
-                        if not isinstance(raw_tag, dict):
-                            continue
-                        partition_id = str(raw_tag.get("partition_id") or "")
-                        fact_ids = list(
-                            dict.fromkeys(
-                                str(value)
-                                for value in raw_tag.get("fact_ids") or []
-                                if str(value)
-                            )
-                        )
-                        if (
-                            partition_id not in allowed_partitions.get(axis_id, set())
-                            or not fact_ids
-                            or any(
-                                fact_id not in facts_by_id
-                                or fact_usage(facts_by_id[fact_id]) != "classification"
-                                or str(facts_by_id[fact_id].get("field_id") or "")
-                                != "topic_partition"
-                                for fact_id in fact_ids
-                            )
-                        ):
-                            continue
-                        evidence_refs = [
-                            dict(ref)
-                            for ref in raw_tag.get("evidence_refs") or []
-                            if isinstance(ref, dict)
-                            and str(ref.get("evidence_key") or "") in partition_candidates
-                        ]
-                        if not evidence_refs:
-                            continue
-                        try:
-                            tag_confidence = max(
-                                0.0,
-                                min(1.0, float(raw_tag.get("confidence") or 0)),
-                            )
-                        except (TypeError, ValueError):
-                            tag_confidence = 0.0
-                        evidence_backed_tags.setdefault(axis_id, []).append(
-                            {
-                                "axis_label": str(
-                                    axis_contract[axis_id].get("label") or ""
-                                )[:120],
-                                "axis_role": str(
-                                    axis_contract[axis_id].get("axis_role")
-                                    or "comparison_dimension"
-                                )[:80],
-                                "partition_id": partition_id,
-                                "partition_label": str(raw_tag.get("partition_label") or "")[:120],
-                                "relation_to_paper": str(
-                                    raw_tag.get("relation_to_paper") or "primary_contribution"
-                                ),
-                                "fact_ids": fact_ids,
-                                "evidence_refs": evidence_refs,
-                                "confidence": tag_confidence,
-                                "assertion_ceiling": normalize_assertion_ceiling(
-                                    raw_tag.get("assertion_ceiling")
-                                ),
-                            }
-                        )
-            classification_outcomes: list[dict[str, Any]] = []
-            for raw_outcome in result.get("classification_outcomes") or []:
-                if not isinstance(raw_outcome, dict):
-                    continue
-                axis_id = str(raw_outcome.get("axis_id") or "")
-                if axis_id not in axis_contract or axis_id in evidence_backed_tags:
-                    continue
-                outcome_status = str(
-                    raw_outcome.get("status") or "insufficient_evidence"
-                ).casefold()
-                if outcome_status not in {
-                    "insufficient_evidence",
-                    "cross_category",
-                    "out_of_scope",
-                }:
-                    outcome_status = "insufficient_evidence"
-                refs = [
-                    dict(ref)
-                    for ref in raw_outcome.get("evidence_refs") or []
-                    if isinstance(ref, dict)
-                    and str(ref.get("evidence_key") or "") in partition_candidates
-                ]
-                if outcome_status in {"cross_category", "out_of_scope"} and not refs:
-                    outcome_status = "insufficient_evidence"
-                classification_outcomes.append(
-                    {
-                        "axis_id": axis_id,
-                        "axis_role": str(
-                            axis_contract[axis_id].get("axis_role") or "comparison_dimension"
-                        )[:80],
-                        "status": outcome_status,
-                        "reason": str(raw_outcome.get("reason") or "")[:800],
-                        "support_excerpt": str(
-                            raw_outcome.get("support_excerpt") or ""
-                        )[:1600]
-                        if refs
-                        else "",
-                        "evidence_refs": refs,
-                        "resolution": str(
-                            raw_outcome.get("resolution")
-                            or "auto_route_from_positive_evidence_only"
-                        )[:120],
-                        "user_action_required": bool(
-                            raw_outcome.get("user_action_required", False)
-                        ),
-                    }
-                )
-            raw_routing = result.get("routing_recommendation")
-            if not isinstance(raw_routing, dict):
-                raw_routing = {}
-            requested_routing_label = str(raw_routing.get("label") or "").strip()
-            routing_label = allowed_routing_labels.get(
-                requested_routing_label.casefold(), ""
+            evidence_backed_tags, axis_contract = self._paper_evidence_backed_tags(
+                result,
+                classification_axes=[
+                    axis
+                    for axis in payload.get("classification_axes") or []
+                    if isinstance(axis, dict)
+                ],
+                partition_candidates=partition_candidates,
+                facts_by_id=facts_by_id,
             )
-            try:
-                routing_confidence = max(
-                    0.0, min(1.0, float(raw_routing.get("confidence") or 0))
-                )
-            except (TypeError, ValueError):
-                routing_confidence = 0.0
-            routing_refs = [
-                dict(ref)
-                for ref in raw_routing.get("evidence_refs") or []
-                if isinstance(ref, dict)
-                and str(ref.get("evidence_key") or "") in fact_candidates
-            ]
-            routing_excerpt = " ".join(
-                str(raw_routing.get("support_excerpt") or "").split()
+            classification_outcomes = self._paper_classification_outcomes(
+                result,
+                axis_contract=axis_contract,
+                evidence_backed_tags=evidence_backed_tags,
+                partition_candidates=partition_candidates,
             )
-            routing_excerpt_valid = bool(
-                routing_excerpt
-                and routing_refs
-                and all(
-                    source_contains_excerpt(
-                        fact_candidates[
-                            str(ref.get("evidence_key") or "")
-                        ].get("content"),
-                        routing_excerpt,
-                    )
-                    for ref in routing_refs
-                )
+            routing_recommendation = self._paper_routing_recommendation(
+                result,
+                allowed_routing_labels=allowed_routing_labels,
+                routing_axis_id=routing_axis_id,
+                fact_candidates=fact_candidates,
+                facts_by_id=facts_by_id,
+                evidence_backed_tags=evidence_backed_tags,
             )
-            routing_classified = bool(
-                routing_axis_id
-                and str(raw_routing.get("axis_id") or "") == routing_axis_id
-                and str(raw_routing.get("status") or "").casefold()
-                == "classified"
-                and routing_label
-                and routing_excerpt_valid
-                and fact_usage(facts_by_id.get(str(raw_routing.get("verification_fact_id") or ""), {})) == "classification"
-            )
-            formal_route_available = bool(
-                routing_axis_id in evidence_backed_tags
-                or str(raw_routing.get("status") or "").casefold()
-                == "formal_axis_route_available"
-            )
-            deterministic_route_available = bool(
-                str(raw_routing.get("status") or "").casefold()
-                == "deterministic_route_available"
-                and routing_label
-            )
-            routing_recommendation = {
-                "verification_fact_id": raw_routing.get("verification_fact_id") if routing_classified else None,
-                "verification": dict((facts_by_id.get(str(raw_routing.get("verification_fact_id") or ""), {}).get("verification") or {})),
-                "schema_version": 1,
-                "axis_id": routing_axis_id,
-                "status": (
-                    "classified"
-                    if routing_classified
-                    else "deterministic_route_available"
-                    if deterministic_route_available
-                    else "formal_axis_route_available"
-                    if formal_route_available
-                    else "insufficient_evidence"
-                ),
-                "label": (
-                    routing_label
-                    if routing_classified or deterministic_route_available
-                    else ""
-                ),
-                "candidate_label": (
-                    routing_label
-                    if routing_label and not routing_classified
-                    else ""
-                ),
-                "confidence": round(routing_confidence, 4),
-                "rationale": str(raw_routing.get("rationale") or "")[:800],
-                "reason": (
-                    ""
-                    if routing_classified
-                    or deterministic_route_available
-                    or formal_route_available
-                    else str(
-                        raw_routing.get("reason")
-                        or "The bounded routing adjudicator found no supported publication category."
-                    )[:800]
-                ),
-                "support_excerpt": (
-                    routing_excerpt if routing_classified else ""
-                ),
-                "evidence_ceiling": str(
-                    raw_routing.get("evidence_ceiling")
-                    or "Do not extend this routing decision beyond the cited study design."
-                )[:600],
-                "evidence_refs": routing_refs if routing_classified else [],
-                "review_status": (
-                    "not_required"
-                    if routing_classified
-                    or deterministic_route_available
-                    or formal_route_available
-                    else "auto_unresolved"
-                ),
-                "extraction_method": str(
-                    raw_routing.get("extraction_method")
-                    or "model_routing_not_completed"
-                )[:120],
-            }
             status = str(result.get("status") or "failed")
-            if result.get("facts") and len(facts) < len(result.get("facts") or []):
+            if result.get("facts") and not {str(f.get("fact_id") or "") for f in result["facts"] if isinstance(f, dict)} <= {str(f.get("fact_id") or "") for f in facts}:
                 status = "partial" if facts else "failed"
             previous_enrichment = row.get("fact_enrichment") or {}
+            if (review_reading and status == "failed" and not result.get("facts")
+                    and paper_reading_current(row.get("scientific_facts") or [], previous_enrichment,
+                                              source_key=source.get("reading_source_key"))):
+                row["fact_enrichment"] = {**previous_enrichment,
+                    "last_attempt": {"status": "failed", "error": str(result.get("error") or "")[:1000],
+                                     "updated_at": utc_now().isoformat()}}
+                continue
             if (
                 status == "failed" and not facts
                 and source.get("source_fingerprint")
@@ -1868,78 +1667,32 @@ class PlanningService(
                                      "updated_at": utc_now().isoformat()},
                 }
                 continue
-            row["scientific_facts"] = merge_facts(facts)
-            row["topic_partition_classification"] = partition_classification
-            row["evidence_backed_tags"] = evidence_backed_tags
-            row["classification_outcomes"] = classification_outcomes
-            row["routing_recommendation"] = routing_recommendation
-            facts = row["scientific_facts"]
-            row["comparison_evidence"] = {
-                field_id: [
-                    dict(fact)
-                    for fact in facts
-                    if str(fact.get("field_id") or "") == field_id
-                ]
-                for field_id in COMPARISON_FIELD_IDS
-            }
-            review_status = str(result.get("review_status") or "needs_review")
-            if review_status not in {
-                "not_required",
-                "auto_resolved",
-                "needs_review",
-                "human_checked",
-            }:
-                review_status = "needs_review"
-            readiness = fact_readiness_report(
+            facts = self._apply_paper_fact_state(
+                row,
+                result,
+                source=source,
                 facts=facts,
-                required_roles=topic_required_roles,
-                extraction_status=status,
-                failed_fields=result.get("failed_fields") or [],
-                baseline=True, topic=str(matrix.get("review_topic") or ""),
-            )
-            row["fact_enrichment"] = {
-                "schema_version": 2,
-                "contract_version": int(
+                status=status,
+                partition_classification=partition_classification,
+                evidence_backed_tags=evidence_backed_tags,
+                classification_outcomes=classification_outcomes,
+                routing_recommendation=routing_recommendation,
+                topic_required_roles=topic_required_roles,
+                review_topic=str(matrix.get("review_topic") or ""),
+                contract_version=int(
                     payload.get("fact_enrichment_contract_version")
                     or MATRIX_FACT_ENRICHMENT_CONTRACT_VERSION
                 ),
-                "status": status,
-                "extraction_status": status,
-                **readiness,
-                "review_status": review_status,
-                "source_fingerprint": str(source.get("source_fingerprint") or ""),
-                "fact_fingerprint": str(source.get("fact_fingerprint") or ""),
-                "classification_refreshed_from_facts": bool(source.get("reusable_fact_result")),
-                "fact_cache_key": str(source.get("fact_cache_key") or ""),
-                "source_lineage_hash": str(
-                    (source.get("index_summary") or {}).get("source_lineage_hash") or ""
-                ),
-                "source_lineages": deepcopy(source.get("source_lineages") or {}),
-                "fact_count": len(facts),
-                "failed_fields": list(result.get("failed_fields") or []),
-                "failed_field_details": deepcopy(
-                    result.get("failed_field_details") or []
-                ),
-                "normalization_rejections": deepcopy(result.get("normalization_rejections") or []),
-                "error": str(result.get("error") or "")[:1000],
-                "automatic_resolution": deepcopy(
-                    result.get("automatic_resolution") or {}
-                ),
-                "fact_extraction_profile": deepcopy(
-                    result.get("fact_extraction_profile") or {}
-                ),
-                "updated_at": utc_now().isoformat(),
-            }
-            row["fact_enrichment"].update(fact_processing_state(facts, row["fact_enrichment"]))
-            analysis = deepcopy(result.get("paper_analysis") or row.get("paper_analysis") or {})
-            analysis["fact_ids"] = [f["fact_id"] for f in facts if fact_is_usable(f)
-                                    and f.get("fact_id") in (analysis.get("fact_ids") or [])]
-            # Keep source-addressable navigation even before individual facts
-            # pass verification; it never substitutes for a supported claim.
-            allowed_keys = set(fact_candidates)
-            analysis["evidence_keys"] = [k for k in analysis.get("evidence_keys") or [] if isinstance(k, str) and k in allowed_keys]
-            analysis["usage"] = "navigation_only"
-            row["paper_analysis"] = analysis if analysis["fact_ids"] or analysis["evidence_keys"] else {}
+            )
+            self._apply_paper_analysis_and_reading(
+                row,
+                result,
+                facts=facts,
+                fact_candidates=fact_candidates,
+                source=source,
+                review_reading=review_reading,
+                review_topic=str(payload.get("review_topic") or ""),
+            )
         classification_axes = [
             deepcopy(axis)
             for axis in payload.get("classification_axes") or updated.get("classification_axes") or []
@@ -3574,9 +3327,6 @@ class PlanningService(
         outline, outline_artifact = self._read_json(
             principal, project_id, OUTLINE_LOGICAL_NAME, required=False
         )
-        references, _references_artifact = self._read_json(
-            principal, project_id, REFERENCE_INDEX_LOGICAL_NAME, required=False
-        )
         blueprint, blueprint_artifact = self._read_json(
             principal, project_id, BLUEPRINT_LOGICAL_NAME, required=False
         )
@@ -3631,23 +3381,11 @@ class PlanningService(
             selected_ids
             and set(_paper_ids(rows)) == set(selected_ids)
         )
-        generated = [
-            {
-                "candidate_id": style,
-                "outline_style": style,
-                "labels": {"en": definition["en"], "zh": definition["zh"]},
-                "outline_md": self._outline_document(
-                    style,
-                    rows,
-                    tags_by_paper=tags_by_paper,
-                    text_by_paper=text_by_paper,
-                    taxonomy_profile=planning_taxonomy_profile,
-                ),
-                "source": "builtin",
-            }
-            for style, definition in OUTLINE_STYLES.items()
-            if style != TOPIC_GUIDED_STYLE
-        ]
+        # The built-in style candidates are deliberately not built here. The
+        # outline chooser renders its cards from a client-side catalog and the
+        # server rebuilds the document when a style is chosen, so nothing reads
+        # these previews; generating them made every poll pay for all styles.
+        generated: list[dict[str, Any]] = []
         topic_recommendation = None
         if not topic_intent.get("available"):
             topic_recommendation = self.topic_recommendation_status(principal, project_id)
@@ -3688,12 +3426,6 @@ class PlanningService(
                     "artifact_id": outline_artifact.id,
                 }
             )
-        all_reference_candidates = list((references or {}).get("candidates") or [])
-        reference_candidates = [
-            candidate
-            for candidate in all_reference_candidates
-            if self._reference_candidate_is_isolated(candidate)
-        ]
         outline_current = self._outline_is_current(
             principal, project_id, outline, outline_artifact, matrix, matrix_artifact
         )
@@ -3779,7 +3511,11 @@ class PlanningService(
         )
         outline_diagnostics = dict((outline or {}).get("taxonomy_diagnostics") or {})
         enrichment_jobs = self.repository.list_project_jobs(
-            principal.user_id, project_id, job_type="matrix.enrich", limit=20
+            principal.user_id,
+            project_id,
+            job_type="matrix.enrich",
+            limit=20,
+            include_payload=False,
         )
         enrichment_counts = {
             status: sum(
@@ -3819,7 +3555,10 @@ class PlanningService(
         return {
             "project_id": project_id,
             "topic": review_topic,
-            "literature_matrix": matrix,
+            "literature_matrix": {
+                **matrix,
+                "rows": [_planning_list_row(row) for row in rows],
+            },
             "matrix_artifact_id": matrix_artifact.id,
             "bibliography_metadata_artifact_ids": bibliography_metadata_artifact_ids,
             "matrix_revision": matrix_state.revision if matrix_state else 0,
@@ -3827,7 +3566,7 @@ class PlanningService(
             "matrix_enrichment": {
                 "summary": enrichment_summary,
                 "counts": enrichment_counts,
-                "jobs": [_planning_job_payload(job) for job in enrichment_jobs],
+                "jobs": [_planning_job_summary(job) for job in enrichment_jobs],
                 "all_failed": all_enrichment_failed,
                 "failed_publish_with_pending_rows": failed_publish_with_pending_rows,
                 "limited_mode_confirmed": bool(
@@ -3865,11 +3604,8 @@ class PlanningService(
                 (public_blueprint or {}).get("taxonomy_diagnostics")
                 or outline_diagnostics
             ),
-            "outline_candidates": generated + reference_candidates,
+            "outline_candidates": generated,
             "topic_recommendation": topic_recommendation,
-            "reference_outline_candidates": reference_candidates,
-            "legacy_reference_outline_count": len(all_reference_candidates)
-            - len(reference_candidates),
             "section_blueprint": public_blueprint,
             "blueprint_artifact_id": blueprint_artifact.id if blueprint_artifact else None,
             "blueprint_revision": blueprint_state.revision if blueprint_state else 0,
@@ -3879,8 +3615,9 @@ class PlanningService(
             "blueprint_candidate_pending": candidate is not None,
             "blueprint_candidate_inputs": candidate_inputs,
             "active_blueprint_artifact_id": active_blueprint_artifact.id if active_blueprint_artifact else None,
-            "blueprint_jobs": [_planning_job_payload(job) for job in self.repository.list_project_jobs(
-                principal.user_id, project_id, job_type="planning.blueprint", limit=5
+            "blueprint_jobs": [_planning_job_summary(job) for job in self.repository.list_project_jobs(
+                principal.user_id, project_id, job_type="planning.blueprint", limit=5,
+                include_payload=False,
             )],
             "section_writing_plan_md": str(
                 (public_blueprint or {}).get("section_writing_plan_md") or ""
@@ -3900,6 +3637,37 @@ class PlanningService(
             },
         }
 
+
+    def matrix_row(self, principal: Principal, project_id: str, paper_id: str) -> dict[str, Any]:
+        """Return one complete Matrix row for the paper detail view.
+
+        The paper list drops the fact cards, comparison evidence and reading
+        analysis of every paper, so the detail view requests the row it is about
+        to show instead of the list carrying all of them.
+        """
+        matrix, matrix_artifact = self._matrix(principal, project_id)
+        refresh_matrix_fact_summary(matrix)
+        matrix, _bibliography_metadata_artifact_ids = self._with_current_bibliography(
+            principal, matrix
+        )
+        labels = library_paper_labels(self.repository.session_factory, principal.user_id)
+        wanted = str(paper_id or "")
+        row = None
+        for candidate_row in matrix.get("rows") or []:
+            if not isinstance(candidate_row, dict):
+                continue
+            row_id = str(candidate_row.get("paper_id") or "")
+            candidate_row["display_label"] = labels.get(row_id, row_id)
+            if row_id == wanted:
+                row = candidate_row
+        if row is None:
+            raise WorkflowNotFound("Paper not found in the current Matrix.")
+        state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
+        return {
+            "paper": row,
+            "matrix_revision": state.revision if state else 0,
+            "matrix_artifact_id": matrix_artifact.id,
+        }
 
     def save_outline(
         self,
@@ -3955,31 +3723,8 @@ class PlanningService(
             raise WorkflowValidationError(
                 "Custom outline editing does not replace the saved outline until a complete outline is explicitly saved."
             )
-        elif style.startswith("reference:") and not manual:
-            references, _artifact = self._read_json(
-                principal, project_id, REFERENCE_INDEX_LOGICAL_NAME, required=False
-            )
-            candidate_id = style.removeprefix("reference:")
-            candidate = next(
-                (
-                    item
-                    for item in (references or {}).get("candidates") or []
-                    if str(item.get("candidate_id")) == candidate_id
-                ),
-                None,
-            )
-            if not isinstance(candidate, dict):
-                raise WorkflowNotFound("Reference outline candidate was not found.")
-            if not self._reference_candidate_is_isolated(candidate):
-                raise WorkflowConflict(
-                    "This legacy reference outline did not pass content isolation. Upload the reference again to learn format only."
-                )
-            markdown = self._validate_outline(
-                str(candidate.get("outline_md") or ""), matrix_ids
-            )
-            complete = True
         elif manual:
-            if style != "custom" and style not in OUTLINE_STYLES and not style.startswith("reference:"):
+            if style != "custom" and style not in OUTLINE_STYLES:
                 raise WorkflowValidationError("Unknown outline style.")
             markdown = self._validate_outline(str(outline_md or ""), matrix_ids)
             complete = True
@@ -4276,6 +4021,14 @@ class PlanningService(
                 stage_id="matrix",
                 files={OUTLINE_LOGICAL_NAME: (_json_bytes(payload), "json")},
                 input_snapshot={"outline_style": style, "manual": manual},
+                # Project navigation needs these inputs for every project. Keeping
+                # them on the artifact row lets a list resolve the 03/04 boundary
+                # without opening each outline file.
+                metadata={
+                    "outline_source_matrix_artifact_id": matrix_artifact.id,
+                    "outline_complete": "true" if complete else "false",
+                    "outline_has_markdown": "true" if str(markdown or "").strip() else "false",
+                },
             )
             state = self.repository.promote_stage_artifacts_atomically(
                 principal.user_id,
@@ -4311,156 +4064,123 @@ class PlanningService(
             "matrix_revision": state.revision,
         }
 
-    def _analyze_reference_document(
+    def _reference_mineru_markdown(
         self,
         principal: Principal,
         project_id: str,
         *,
-        candidate_id: str,
         safe_name: str,
         raw: bytes,
-        matrix: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> str:
+        """Parse one reference PDF with MinerU and return its Markdown.
+
+        MinerU reports a heading level for every title, so the imported outline
+        keeps the document's real nesting instead of guessing from flat text.
+        """
         if self.scientific_runner is None:
             raise WorkflowValidationError(
-                "Reference-format analysis is unavailable in this deployment."
+                "Reference PDF parsing is unavailable in this deployment."
             )
-        environment: dict[str, str] = {}
-        gateway_context: SimpleNamespace | None = None
-        if self.model_gateway is not None:
-            gateway_context = self._begin_reference_gateway_job(
-                principal, project_id, candidate_id
+        environment = (
+            self.provider_settings.mineru_environment(principal)
+            if self.provider_settings is not None
+            else {}
+        )
+        if not environment.get("MINERU_API_TOKEN"):
+            raise WorkflowValidationError(
+                "Configure and enable the MinerU provider before importing a PDF reference review."
             )
-            gateway_normal, gateway_secrets = self.model_gateway.environment_for_job(
-                gateway_context
-            )
-            environment = {**gateway_normal, **gateway_secrets}
-        elif self.provider_settings is not None:
-            try:
-                environment = self.provider_settings.runtime_environment(
-                    principal,
-                    provider_kinds=(ProviderKind.TEXT,),
-                )
-            except ProviderSettingsError as exc:
-                raise WorkflowValidationError(
-                    "Configure and enable the text provider before analyzing a reference review."
-                ) from exc
-            if not environment.get("OPENAI_API_KEY"):
-                raise WorkflowValidationError(
-                    "Configure and enable the text provider before analyzing a reference review."
-                )
         script = (
             self.root
             / "skills"
-            / "review-reference-outline-template"
+            / "mineru-precise-parse-review-writer"
             / "scripts"
-            / "analyze_reference_review.py"
+            / "parse_review_writer_pdfs.py"
         )
         if not script.is_file():
-            if gateway_context is not None:
-                self._finish_reference_gateway_job(
-                    gateway_context.job_id,
-                    succeeded=False,
-                    error_message="Reference analysis skill is not installed.",
-                )
-            raise WorkflowValidationError(
-                "The reference-format analysis skill is not installed."
-            )
+            raise WorkflowValidationError("The MinerU parsing skill is not installed.")
+        normal_environment = {
+            key: value
+            for key, value in environment.items()
+            if not SENSITIVE_ENVIRONMENT_KEY.search(key)
+        }
+        secret_environment = {
+            key: value
+            for key, value in environment.items()
+            if SENSITIVE_ENVIRONMENT_KEY.search(key)
+        }
         staging_parent = self.artifacts.workspace_manager.trusted_user_directory(
             principal.user_id,
             ".review-writer",
-            "reference-outline-analysis",
+            "reference-outline-import",
         )
         with tempfile.TemporaryDirectory(
-            prefix=f"{candidate_id}-", dir=staging_parent
+            prefix="reference-", dir=staging_parent
         ) as temporary:
             staging = Path(temporary).resolve()
-            source = staging / safe_name
-            matrix_path = staging / "literature_matrix.json"
-            output_path = staging / "candidate.json"
-            source.write_bytes(raw)
-            matrix_path.write_text(
-                json.dumps(matrix, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
+            pdf_path = staging / safe_name
+            pdf_path.write_bytes(raw)
+            output_dir = staging / "mineru"
+            manifest_path = staging / "mineru-manifest.json"
+            language = pdf_language_hint(pdf_flat_text(raw, max_pages=3))
+            self.scientific_runner.run(
+                (
+                    sys.executable,
+                    str(script),
+                    "--pdf",
+                    str(pdf_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--manifest-path",
+                    str(manifest_path),
+                    *((("--language", language),) if language else ()),
+                ),
+                cwd=self.root,
+                staging_directory=staging,
+                expected_outputs=("mineru-manifest.json",),
+                env=normal_environment,
+                secret_env=secret_environment,
+                timeout_seconds=30 * 60,
             )
-            normal_environment = {
-                key: value
-                for key, value in environment.items()
-                if not SENSITIVE_ENVIRONMENT_KEY.search(key)
-            }
-            secret_environment = {
-                key: value
-                for key, value in environment.items()
-                if SENSITIVE_ENVIRONMENT_KEY.search(key)
-            }
-            try:
-                self.scientific_runner.run(
-                    (
-                        sys.executable,
-                        str(script),
-                        "--input",
-                        str(source),
-                        "--matrix",
-                        str(matrix_path),
-                        "--output",
-                        str(output_path),
-                        "--project-id",
-                        project_id,
-                        "--candidate-id",
-                        candidate_id,
-                    ),
-                    cwd=self.root,
-                    staging_directory=staging,
-                    expected_outputs=("candidate.json",),
-                    env=normal_environment,
-                    secret_env=secret_environment,
-                    timeout_seconds=900,
-                )
-                result = json.loads(output_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                if gateway_context is not None:
-                    self._finish_reference_gateway_job(
-                        gateway_context.job_id,
-                        succeeded=False,
-                        error_message=str(exc),
-                    )
+            markdown_files = sorted((output_dir / "markdown").glob("*.md"))
+            if not markdown_files:
                 raise WorkflowConflict(
-                    "Reference-format analysis returned an unreadable result."
-                ) from exc
-            except Exception as exc:
-                if gateway_context is not None:
-                    self._finish_reference_gateway_job(
-                        gateway_context.job_id,
-                        succeeded=False,
-                        error_message=str(exc),
-                    )
-                raise
-        if not isinstance(result, dict):
-            if gateway_context is not None:
-                self._finish_reference_gateway_job(
-                    gateway_context.job_id,
-                    succeeded=False,
-                    error_message="Reference analysis returned a non-object result.",
+                    "MinerU returned no Markdown for the uploaded reference review."
                 )
-            raise WorkflowConflict(
-                "Reference-format analysis returned an invalid result."
-            )
-        if not self._reference_candidate_is_isolated(result):
-            if gateway_context is not None:
-                self._finish_reference_gateway_job(
-                    gateway_context.job_id,
-                    succeeded=False,
-                    error_message="Reference analysis failed the content-isolation gate.",
+            return markdown_files[0].read_text(encoding="utf-8", errors="replace")
+
+    def _reference_headings(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        safe_name: str,
+        raw: bytes,
+    ) -> tuple[list[Heading], str, str]:
+        """Return ``(headings, extraction source, confidence)`` for one upload."""
+        suffix = Path(safe_name).suffix.casefold()
+        if suffix == ".docx":
+            return headings_from_docx(raw), "docx-heading-styles", "high"
+        text = raw.decode("utf-8", errors="replace")
+        if suffix == ".pdf":
+            try:
+                markdown = self._reference_mineru_markdown(
+                    principal, project_id, safe_name=safe_name, raw=raw
                 )
-            raise WorkflowConflict(
-                "Reference analysis failed the content-isolation gate; the uploaded review was not added."
-            )
-        if gateway_context is not None:
-            self._finish_reference_gateway_job(
-                gateway_context.job_id,
-                succeeded=True,
-            )
-        return result
+            except (WorkflowError, ScientificRunError):
+                # Report a lower confidence instead of failing the upload: the
+                # user still gets the headings the flat text can offer.
+                flat = pdf_flat_text(raw)
+                return (
+                    headings_from_markdown(flat) or headings_from_plain_text(flat),
+                    "pdf-flat-text-fallback",
+                    "low",
+                )
+            return headings_from_markdown(markdown), "pdf-mineru-markdown", "high"
+        markdown_headings = headings_from_markdown(text)
+        if markdown_headings:
+            return markdown_headings, "markdown-headings", "high"
+        return headings_from_plain_text(text), "text-headings", "medium"
 
     def register_reference(
         self,
@@ -4471,6 +4191,13 @@ class PlanningService(
         filename: str,
         content_base64: str,
     ) -> dict[str, Any]:
+        """Import the section headings a reference review document already has.
+
+        The upload does not become a candidate of its own: the headings go
+        straight to the outline editor, where the user reviews them and saves
+        them as their own outline. Nothing is written to the Matrix, so the
+        revision only guards against acting on a stale page.
+        """
         principal.require(Permission.PROJECT_WRITE)
         self._matrix(principal, project_id)
         safe_name = Path(str(filename or "")).name
@@ -4487,80 +4214,109 @@ class PlanningService(
             raise WorkflowValidationError("Uploaded reference file is empty.")
         if len(raw) > 30 * 1024 * 1024:
             raise WorkflowValidationError("Uploaded reference file exceeds 30 MB.")
-        matrix, _matrix_artifact = self._matrix(principal, project_id)
-        matrix_ids = _paper_ids(matrix["rows"])
-        candidate_id = f"reference-{uuid.uuid4().hex[:12]}"
-        analysis = self._analyze_reference_document(
-            principal,
-            project_id,
-            candidate_id=candidate_id,
-            safe_name=safe_name,
-            raw=raw,
-            matrix=matrix,
-        )
-        outline_text = self._validate_outline(
-            str(analysis.get("outline_md") or ""), set(matrix_ids)
-        )
-        analysis_mode = str(analysis.get("analysis_mode") or "")
-        references, _references_artifact = self._read_json(
-            principal, project_id, REFERENCE_INDEX_LOGICAL_NAME, required=False
-        )
-        index = deepcopy(references or {"project_id": project_id, "candidates": []})
-        source_logical = f"planning/references/{candidate_id}/{safe_name}"
-        with self._write_lock:
-            published, run = self._publish_files(
-                principal,
-                project_id,
-                stage_id="matrix",
-                files={
-                    source_logical: (raw, suffix.lstrip(".")),
+        state = self.repository.get_stage_state(principal.user_id, project_id, "matrix")
+        if state is not None and state.revision != int(revision):
+            raise WorkflowConflict(
+                "The Matrix changed. Refresh Planning before importing a reference outline.",
+                details={
+                    "expected_revision": int(revision),
+                    "actual_revision": state.revision,
                 },
-                input_snapshot={"filename": safe_name},
             )
-            candidate = {
-                "candidate_id": candidate_id,
-                "outline_style": f"reference:{candidate_id}",
-                "labels": {"en": safe_name, "zh": f"参考大纲：{safe_name}"},
-                "outline_md": outline_text,
-                "source": "reference",
-                "source_name": safe_name,
-                "source_artifact_id": published[source_logical].id,
-                "analysis_mode": analysis_mode,
-                "content_source": "current_matrix_only",
-                "reference_content_reused": False,
-                "content_firewall": deepcopy(analysis.get("content_firewall") or {}),
-                "reference_structure_metrics": deepcopy(
-                    analysis.get("reference_structure_metrics") or {}
-                ),
-                "writing_style": deepcopy(analysis.get("writing_style") or {}),
-                "created_at": utc_now().isoformat(),
-            }
-            index["candidates"] = [*(index.get("candidates") or []), candidate]
-            index_published, index_run = self._publish_files(
-                principal,
-                project_id,
-                stage_id="matrix",
-                files={REFERENCE_INDEX_LOGICAL_NAME: (_json_bytes(index), "json")},
-                input_snapshot={"source_artifact_id": published[source_logical].id},
+        headings, source, confidence = self._reference_headings(
+            principal, project_id, safe_name=safe_name, raw=raw
+        )
+        if not headings:
+            raise WorkflowValidationError(
+                "No section headings were found in the uploaded document."
             )
-            state = self.repository.promote_stage_artifacts_atomically(
-                principal.user_id,
-                project_id,
-                "matrix",
-                artifact_ids={
-                    REFERENCE_INDEX_LOGICAL_NAME: index_published[
-                        REFERENCE_INDEX_LOGICAL_NAME
-                    ].id
-                },
-                run_id=index_run.id,
-                expected_revision=revision,
-                status="review",
-            )
+        result = extract_outline(headings, confidence=confidence)
         return {
             "project_id": project_id,
-            "candidate": candidate,
-            "matrix_revision": state.revision,
+            "filename": safe_name,
+            "outline_md": render_outline_markdown(result.sections),
+            "section_count": len(result.sections),
+            "skipped": list(dict.fromkeys(result.skipped)),
+            "dropped_duplicates": list(dict.fromkeys(result.dropped_duplicates)),
+            "unverified": [
+                section.title for section in result.sections if section.unverified
+            ],
+            "introduced_heading": result.introduced_heading,
+            "truncated": result.truncated,
+            "confidence": result.confidence,
+            "extraction_source": source,
+            "matrix_revision": state.revision if state else 0,
         }
+
+    def planning_matrix_with_sources(self, principal, matrix, *, reading_strategy=None):
+        """Build model-only navigation context without changing the business Matrix."""
+        planning_matrix = deepcopy(matrix)
+        rows = [row for row in planning_matrix.get("rows") or [] if isinstance(row, dict)]
+        for row in rows:
+            row["abstract"] = self._matrix_abstract(row)
+            row.pop("planning_source_passages", None)
+        index = self.library_index
+        if index is None or not index.enabled:
+            return planning_matrix
+        if reading_strategy != REVIEW_READING_STRATEGY:
+            missing = [str(row["paper_id"]) for row in rows if not row["abstract"]]
+            if missing:
+                by_id = {str(row["paper_id"]): row for row in rows}
+                for hit in index.primary_coverage_hits(principal, allowed_papers=missing, per_paper_limit=3):
+                    by_id[hit.paper_id].setdefault("planning_source_passages", []).append({
+                        "chunk_id": hit.chunk_id, "source_lineage_hash": hit.source_lineage_hash,
+                        "page_start": hit.page_start, "page_end": hit.page_end, "content": hit.content[:3000]})
+            return planning_matrix
+
+        paper_ids = [str(row["paper_id"]) for row in rows]
+        catalog = self._catalog(principal, paper_ids)
+        parents = self._supporting_source_parents(catalog, paper_ids)
+        summaries = index.summaries(principal, list(dict.fromkeys([*paper_ids, *parents])))
+        for row in rows:
+            pid = str(row["paper_id"])
+            allowed = {pid, *(sid for sid, parent in parents.items() if parent == pid)}
+            lineages = {sid: str((summaries.get(sid) or {}).get("source_lineage_hash") or "") for sid in allowed}
+            refs = [ref for ref in navigation_source_refs(row)
+                    if ref["source_file_id"] in allowed and ref["chunk_id"] != "abstract"
+                    and ref["source_lineage_hash"] == lineages.get(ref["source_file_id"])]
+            passages = {}
+            if callable(getattr(index, "resolve_source_chunks", None)):
+                for sid in sorted({ref["source_file_id"] for ref in refs}):
+                    source_refs = [ref for ref in refs if ref["source_file_id"] == sid]
+                    by_chunk = {str(hit["chunk_id"]): hit for hit in index.resolve_source_chunks(
+                        principal, sid, [ref["chunk_id"] for ref in source_refs], expected_lineage=lineages[sid])}
+                    for ref in source_refs:
+                        hit = by_chunk.get(ref["chunk_id"])
+                        if (hit and hit.get("source_lineage_hash") == lineages[sid]
+                                and _usable_fact_candidate(hit.get("content_type"), hit.get("content"))):
+                            passages[ref["evidence_key"]] = {**hit, "paper_id": pid, "source_file_id": sid,
+                                "evidence_key": ref["evidence_key"], "usage": "source_passage_not_verified_fact"}
+            # A referenced introduction or abstract may describe prior work.
+            # Always retain a bounded interior contribution sample as well.
+            if lineages.get(pid) and callable(getattr(index, "primary_contribution_hits", None)):
+                for hit in index.primary_contribution_hits(principal, paper_id=pid,
+                        contribution=str((row.get("paper_analysis") or {}).get("contribution") or row.get("title") or ""), limit=2):
+                    if (hit.paper_id != pid or hit.source_lineage_hash != lineages[pid]
+                            or not _usable_fact_candidate(hit.content_type, hit.content)):
+                        continue
+                    key = academic_evidence_key(pid, hit.chunk_id, hit.source_lineage_hash)
+                    passages[key] = {"paper_id": pid, "source_file_id": pid, "chunk_id": hit.chunk_id,
+                        "evidence_key": key, "source_lineage_hash": hit.source_lineage_hash,
+                        "page_start": hit.page_start, "page_end": hit.page_end,
+                        "section_path": list(hit.section_path), "content": hit.content,
+                        "content_type": hit.content_type, "usage": "source_passage_not_verified_fact"}
+            if not passages and lineages.get(pid) and callable(getattr(index, "sample_document_context", None)):
+                for hit in index.sample_document_context(principal, pid, expected_lineage=lineages[pid], limit=3):
+                    if hit.get("source_lineage_hash") != lineages[pid]:
+                        continue
+                    key = academic_evidence_key(pid, hit["chunk_id"], lineages[pid])
+                    passages[key] = {**hit, "paper_id": pid, "source_file_id": pid, "evidence_key": key,
+                                     "usage": "source_passage_not_verified_fact"}
+            row["planning_source_passages"] = [
+                {**hit, "content": str(hit.get("content") or "")[:3000]}
+                for hit in list(passages.values())[:2] + list(passages.values())[2:][-2:]
+            ]
+        return planning_matrix
 
     def prepare_blueprint(
         self,
@@ -4568,6 +4324,7 @@ class PlanningService(
         project_id: str,
         *,
         revision: int,
+        reading_strategy: str | None = REVIEW_READING_STRATEGY,
     ) -> dict[str, Any]:
         principal.require(Permission.PROJECT_WRITE)
         previous_blueprint, previous_blueprint_artifact = self._read_json(
@@ -5220,26 +4977,12 @@ class PlanningService(
             )
             + "\n",
         }
-        planning_matrix = deepcopy(matrix)
-        missing_abstract = []
-        for row in planning_matrix.get("rows") or []:
-            row["abstract"] = self._matrix_abstract(row)
-            if not row["abstract"]:
-                missing_abstract.append(str(row["paper_id"]))
-        if missing_abstract and self.library_index is not None and self.library_index.enabled:
-            rows_by_id = {str(row["paper_id"]): row for row in planning_matrix["rows"]}
-            for hit in self.library_index.primary_coverage_hits(
-                principal, allowed_papers=missing_abstract, per_paper_limit=3
-            ):
-                rows_by_id[hit.paper_id].setdefault("planning_source_passages", []).append({
-                    "chunk_id": hit.chunk_id,
-                    "source_lineage_hash": hit.source_lineage_hash,
-                    "page_start": hit.page_start,
-                    "page_end": hit.page_end,
-                    "content": hit.content[:3000],
-                })
+        if reading_strategy == REVIEW_READING_STRATEGY:
+            blueprint["reading_strategy"] = REVIEW_READING_STRATEGY
+        planning_matrix = self.planning_matrix_with_sources(principal, matrix, reading_strategy=reading_strategy)
         prepared = {
             "project_id": project_id,
+            **({"reading_strategy": REVIEW_READING_STRATEGY} if reading_strategy == REVIEW_READING_STRATEGY else {}),
             "section_blueprint": blueprint,
             "blueprint_revision": revision,
             "matrix_revision": matrix_state.revision,

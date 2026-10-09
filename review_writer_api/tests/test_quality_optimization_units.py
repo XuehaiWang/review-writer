@@ -594,7 +594,8 @@ The supplied evidence package establishes the result.
             "sources": {
                 "crossref": {
                     "status": "verified",
-                    "candidate": {"title": "Catalytic Allenation"},
+                    "candidate": {"title": "Catalytic Allenation", "authors": ["A. Author"],
+                                  "identifiers": {"doi": "10.1000/example"}},
                 },
                 "openalex": {"status": "unavailable", "error": "timeout"},
             }

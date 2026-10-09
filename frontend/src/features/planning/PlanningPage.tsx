@@ -14,6 +14,8 @@ import { jobIsActive } from "../../hooks/useJob";
 import { applyOutlinePaperRecommendations, buildPaperDisplayLabels, OutlineBuilder, parseOutlineMarkdown, validateVisualOutline } from "./OutlineBuilder";
 import { MatrixLiveProgress, readMatrixEnrichmentLive } from "./MatrixLiveProgress";
 import { MatrixAnalysisStatus, MatrixEvidenceUse, analysisState } from "./MatrixAnalysisStatus";
+import { MatrixFactRecords, MatrixPaperGuide, MatrixReadingStatus } from "./MatrixPaperReading";
+import { readingCompleted, type FactExtractionProfile, type FactProcessing, type FactsDigest, type MatrixFact, type PaperAnalysis } from "./matrixReading";
 import { BibliographyResolutionPanel } from "./BibliographyResolutionPanel";
 import { usePlanningCompletionSync } from "./usePlanningCompletionSync";
 import { TopicRecommendationPending, type TopicRecommendationState } from "./TopicRecommendationPending";
@@ -32,27 +34,17 @@ type MatrixPaper = Record<string, unknown> & {
   full_reading_complete?: boolean;
   reading_complete?: boolean;
   most_relevant_figure?: Record<string, unknown>;
-  scientific_facts?: Array<{
-    fact_id?: string;
-    field_id?: string;
-    value?: string;
-    support_excerpt?: string;
-    epistemic_status?: string;
-    source_channel?: string;
-    support_level?: "direct" | "abstract_limited" | "context_only" | "coverage_only";
-    review_status?: "not_required" | "auto_limited" | "needs_review" | "human_checked";
-    confidence?: number;
-    evidence_ceiling?: string;
-    assertion_ceiling?: string;
-    evidence_refs?: Array<{ page_start?: number | null; page_end?: number | null; chunk_id?: string }>;
-  }>;
+  scientific_facts?: MatrixFact[];
+  facts_digest?: FactsDigest;
+  paper_analysis?: PaperAnalysis;
   fact_enrichment?: {
     status?: string;
     extraction_status?: string;
-    processing?: { extraction?: string; verification?: string; source_recovery?: string };
+    processing?: FactProcessing;
     pending_fact_count?: number;
     verified_fact_count?: number;
-    fact_extraction_profile?: { stop_reason?: string };
+    fact_extraction_profile?: FactExtractionProfile;
+    pending_revision_fact_ids?: string[];
     review_readiness?: "complete" | "partial" | "source_not_established";
     required_fact_roles?: string[];
     supported_fact_roles?: string[];
@@ -234,6 +226,21 @@ type TopicOutlineIntent = {
   system_recommended?: boolean;
 };
 
+/** What one uploaded reference review contributed to the outline editor. */
+export type ReferenceOutlineImport = {
+  filename: string;
+  outline_md: string;
+  section_count: number;
+  skipped: string[];
+  dropped_duplicates: string[];
+  unverified: string[];
+  introduced_heading: boolean;
+  truncated: number;
+  confidence: "high" | "medium" | "low";
+  extraction_source: string;
+  matrix_revision: number;
+};
+
 type OutlineCandidate = Record<string, unknown> & {
   candidate_id?: string;
   outline_style?: string;
@@ -283,12 +290,25 @@ export type PlanningPayload = {
   outline_options_md?: string;
   outline_selection?: Record<string, unknown>;
   outline_candidates?: OutlineCandidate[];
-  reference_outline_candidates?: Array<Record<string, unknown> & { candidate_id?: string; source_name?: string }>;
-  legacy_reference_outline_count?: number;
   section_blueprint?: {
     fact_source_issues?: Array<{ paper_id: string; fact_id: string; value?: string; reasons: string[]; action: string }>;
     unused_papers?: Array<{ paper_id: string; reason_code: string; reason: string }>;
-    academic_planning?: { status?: string; incomplete_sections?: string[]; resume_available?: boolean; stop_reason?: string };
+    academic_planning?: {
+      status?: string;
+      execution_status?: string;
+      content_status?: string;
+      incomplete_sections?: string[];
+      unsupported_sections?: string[];
+      resume_available?: boolean;
+      stop_reason?: string;
+    };
+    scope_coverage_gaps?: Array<{
+      section_id: string;
+      title?: string;
+      reason_code?: string;
+      reason?: string;
+      outline_position?: number;
+    }>;
     sections?: BlueprintSection[];
     resolved_outline_md?: string;
     auto_routing_adjustments?: AutoRoutingAdjustment[];
@@ -335,7 +355,8 @@ const outlineStyles = [
   { id: "custom", icon: "E", titleZh: "自定义大纲", titleEn: "Custom outline", descriptionZh: "在下方按模块填写，也可使用代码填写。保存后才会应用。", descriptionEn: "Edit modules below or use the code editor. Changes apply when saved." },
 ];
 
-function factStatusLabel(status: string, text: (zh: string, en: string) => string): string {
+function factStatusLabel(status: string, text: (zh: string, en: string) => string, read = false): string {
+  if (read && ["complete", "limited"].includes(status)) return text("已阅读", "Read");
   return ({
     complete: text("已完成", "Completed"),
     limited: text("已完成·部分可用", "Completed · partially usable"),
@@ -384,7 +405,27 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
   const [filter, setFilter] = useState("");
   const papers = payload.literature_matrix?.rows || [];
   const [selectedId, setSelectedId] = useState(papers[0]?.paper_id || "");
-  const selected = papers.find((paper) => paper.paper_id === selectedId) || papers[0];
+  const enrichmentJob = payload.matrix_enrichment?.jobs?.[0];
+  const enrichmentActive = Boolean(enrichmentJob && jobIsActive(enrichmentJob.status));
+  // List rows omit each paper's fact records, comparison evidence and reading
+  // analysis, so the paper the user opened loads its own full row.
+  const matrixRow = useQuery({
+    queryKey: queryKeys.planningMatrix(projectId, selectedId),
+    queryFn: () => apiRequest<{ paper: MatrixPaper }>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/planning/matrix/${encodeURIComponent(selectedId)}`
+    ),
+    enabled: Boolean(projectId && selectedId) && mode === "reading",
+    refetchInterval: enrichmentActive ? 2000 : false,
+  });
+  const selectedRow = papers.find((paper) => paper.paper_id === selectedId) || papers[0];
+  const selected = useMemo(() => {
+    const full = matrixRow.data?.paper;
+    return selectedRow && full && full.paper_id === selectedRow.paper_id
+      ? { ...selectedRow, ...full }
+      : selectedRow;
+  }, [selectedRow, matrixRow.data]);
+  // Claiming "no verified facts" while the row is still loading would be wrong.
+  const detailLoaded = Boolean(selected) && matrixRow.data?.paper?.paper_id === selected?.paper_id;
   const reading = useFormDraft(`reading:${projectId}:${selected?.paper_id || "none"}`, { note: selected?.main_content || "", complete: Boolean(selected?.full_reading_complete || selected?.reading_complete) });
   const { note, complete } = reading.value;
   const setNote = (note: string) => reading.set({ ...reading.value, note });
@@ -393,13 +434,12 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
   const outlineDraft = outline.value;
   const setOutlineDraft = outline.set;
   const [outlineSaveMessage, setOutlineSaveMessage] = useState("");
+  const [referenceImportMessage, setReferenceImportMessage] = useState("");
   const [customEditing, setCustomEditing] = useState(false);
   const scope = useFormDraft<ScopeContract>(`scope:${projectId}`, payload.scope_contract || {});
   const scopeDraft = scope.value;
   const setScopeDraft = scope.set;
   const paperLabels = useMemo(() => buildPaperDisplayLabels(papers), [papers]);
-  const enrichmentJob = payload.matrix_enrichment?.jobs?.[0];
-  const enrichmentActive = Boolean(enrichmentJob && jobIsActive(enrichmentJob.status));
   const enrichmentLive = enrichmentActive && enrichmentJob ? readMatrixEnrichmentLive(enrichmentJob) : null;
   const activeFactPaperIds = new Set(enrichmentLive?.active_paper_ids || []);
   if (enrichmentLive?.current_paper_id) activeFactPaperIds.add(enrichmentLive.current_paper_id);
@@ -475,11 +515,45 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
     onSuccess: (result, sourceOutline) => { if (outlineDraft === sourceOutline) setOutlineDraft(applyOutlinePaperRecommendations(outlineDraft, result.sections)); },
   });
   const uploadReference = useMutation({
-    mutationFn: async (file: File) => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/reference-outlines`, {
+    mutationFn: async (file: File) => apiRequest<ReferenceOutlineImport>(`/api/v1/projects/${encodeURIComponent(projectId)}/planning/reference-outlines`, {
       method: "POST",
       ...jsonBody({ revision: payload.matrix_revision, filename: file.name, content_base64: await fileBase64(file) }),
     }),
-    onSuccess: refresh,
+    onSuccess: (result) => {
+      // The import only fills the editor; saving stays an explicit user action.
+      setOutlineSaveMessage("");
+      setCustomEditing(true);
+      setOutlineDraft(result.outline_md);
+      const parts = [text(
+        `已从《${result.filename}》导入 ${result.section_count} 个章节（层级已保留）。请检查后再保存。`,
+        `Imported ${result.section_count} sections from “${result.filename}” with their levels. Review them, then save.`,
+      )];
+      if (result.skipped.length) {
+        parts.push(text(
+          `已跳过非章节内容：${result.skipped.join("、")}。`,
+          `Skipped non-section content: ${result.skipped.join(", ")}.`,
+        ));
+      }
+      if (result.introduced_heading) {
+        parts.push(text("原文档没有 Introduction，已在最前面补上。", "The document had no introduction, so one was added first."));
+      }
+      if (result.unverified.length) {
+        parts.push(text(
+          `有 ${result.unverified.length} 个标题未能在原文中逐字定位，已保留但请核对。`,
+          `${result.unverified.length} heading(s) could not be located verbatim in the document; they are kept and marked for review.`,
+        ));
+      }
+      if (result.truncated) {
+        parts.push(text(`文档章节过多，已只保留前 ${result.section_count} 节。`, `The document had more sections; only the first ${result.section_count} were kept.`));
+      }
+      if (result.confidence !== "high") {
+        parts.push(text(
+          "未能可靠还原层级，请重点核对层级是否正确。",
+          "The heading levels could not be recovered reliably; please check them.",
+        ));
+      }
+      setReferenceImportMessage(parts.join(""));
+    },
   });
   const visiblePapers = papers.filter((paper) => [paper.paper_id, paperLabels.get(paper.paper_id), displayText(paper.title), paper.keywords?.join(" "), paper.abstract].join(" ").toLowerCase().includes(filter.toLowerCase()));
   const selectedStyle = String(payload.outline_selection?.outline_style || "");
@@ -509,7 +583,7 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
       : chooseOutline.isPending && chooseOutline.variables === style ? text("正在应用…", "Applying…")
       : isCurrentOutline(style) ? currentLabel : label;
   const selectedStyleLabel = selectedStyle.startsWith("reference:")
-    ? String(payload.reference_outline_candidates?.find(candidate => `reference:${candidate.candidate_id}` === selectedStyle)?.source_name || text("参考综述大纲", "Reference review outline"))
+    ? text("旧版参考大纲", "Legacy reference outline")
     : selectedStyle === "topic-guided" ? text("主题推荐", "Topic recommendation")
       : selectedPreset ? text(selectedPreset.titleZh, selectedPreset.titleEn) : selectedStyle;
   const topicOutlineCandidate = useMemo(
@@ -528,7 +602,6 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
       `Recommended ${recommendationSummary.recommended_paper_count} papers across ${recommendationSummary.body_section_count} body sections${recommendationSummary.fulltext_used ? " using full-text retrieval" : ""}${recommendationSummary.model_used ? `; the model resolved ${recommendationSummary.model_resolved_paper_count} ambiguous matches` : ""}${recommendationSummary.model_fallback_used ? "; the model was unavailable, so conservative matching was used" : ""}${recommendationSummary.unassigned_paper_count ? `; ${recommendationSummary.unassigned_paper_count} papers were deliberately left unassigned` : ""}. Review the selections, then save the outline.`,
     )
     : "";
-  const facts = selected?.scientific_facts || [];
   const formalClassificationTags = Object.values(selected?.evidence_backed_tags || {}).flat();
   const provisionalClassificationTags = selected?.provisional_screening_tags || [];
   const classificationOutcomes = selected?.classification_outcomes || [];
@@ -537,7 +610,11 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
   const automaticallyHandledOutcomes = classificationOutcomes.filter((outcome) => outcome.user_action_required !== true);
   const unresolvedTopicPartition = ["boundary", "insufficient_evidence", "cross_category", "out_of_scope"].includes(String(selected?.topic_partition_classification?.status || ""));
   const bibliographyIssueCount = papers.filter((paper) => paper.bibliography_identity?.verified === false).length;
-  const emptyFactMessage = enrichmentActive
+  const emptyFactMessage = !detailLoaded
+    ? text("正在加载本篇的事实记录…", "Loading this paper's fact records…")
+    : selected && readingCompleted(selected) && ["complete", "limited"].includes(selectedFactStatus)
+    ? text("初读已完成，当前没有可单独列出的发现；可通过导读和原文继续规划，按实际问题补充证据。", "First reading is complete, with no separate findings recorded. Use the guide and sources to plan, then retrieve evidence for specific questions.")
+    : enrichmentActive
     ? text("正在从全文证据中提取本篇论文的科学事实。", "Scientific facts are being extracted from this paper's evidence.")
     : enrichmentFailed && hasRecoveryCheckpoint && selectedFactStatus === "pending"
       ? text("本篇事实已经完成提取，但尚未显示在文献分析中；请使用左侧的“继续未完成分析”。", "This paper was extracted but has not appeared in Paper analysis. Use Resume unfinished analysis on the left.")
@@ -559,7 +636,7 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
       {mode === "reading" ? (
         <div className="planning-grid">
           <section className="pane planning-list-pane">
-            <div className="pane-head matrix-fact-head"><div><span className="step-label">{text("文献分析", "Paper analysis")}</span><h2>{papers.length} {text("篇论文", "papers")}</h2><p>{enrichmentActive ? text(`正在提取科学事实 ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`, `Extracting scientific facts ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`) : text("查看每篇论文的研究事实、原文依据和分类结果；章节规划会复用这些证据。", "Review each paper's findings, source evidence, and classification; chapter planning reuses this evidence.")}</p><div className="matrix-fact-counts"><span className="complete">{text("已完成", "Completed")} {factCounts.complete}</span><span className="pending">{text("分析中", "Analyzing")} {factCounts.running}</span><span className="pending">{text("待分析或核验", "Pending analysis or verification")} {factCounts.pending}</span><span className="failed">{text("需恢复", "Recovery needed")} {factCounts.failed}</span></div><div className="matrix-header-actions">{bibliographyIssueCount ? <button type="button" className="matrix-bibliography-note" onClick={() => setSelectedId(papers.find((paper) => paper.bibliography_identity?.verified === false)?.paper_id || selectedId)}><strong>{text(`书目待核验 ${bibliographyIssueCount}`, `${bibliographyIssueCount} bibliography records pending`)}</strong><span>{text("点击定位并解决，不阻断内部写作。", "Open the affected paper and resolve it without blocking internal writing.")}</span></button> : null}
+            <div className="pane-head matrix-fact-head"><div><span className="step-label">{text("文献分析", "Paper analysis")}</span><h2>{papers.length} {text("篇论文", "papers")}</h2><p>{enrichmentActive ? text(`正在阅读论文 ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`, `Reading papers ${enrichmentJob?.progress_current || 0}/${enrichmentJob?.progress_total || papers.length}`) : text("查看每篇论文的研究事实、原文依据和分类结果；章节规划会复用这些证据。", "Review each paper's findings, source evidence, and classification; chapter planning reuses this evidence.")}</p><div className="matrix-fact-counts"><span className="complete">{text("阅读完成", "Reading complete")} {factCounts.complete}</span><span className="pending">{text("分析中", "Analyzing")} {factCounts.running}</span><span className="pending">{text("待处理", "Pending")} {factCounts.pending}</span><span className="failed">{text("需恢复", "Recovery needed")} {factCounts.failed}</span></div><div className="matrix-header-actions">{bibliographyIssueCount ? <button type="button" className="matrix-bibliography-note" onClick={() => setSelectedId(papers.find((paper) => paper.bibliography_identity?.verified === false)?.paper_id || selectedId)}><strong>{text(`书目待核验 ${bibliographyIssueCount}`, `${bibliographyIssueCount} bibliography records pending`)}</strong><span>{text("点击定位并解决，不阻断内部写作。", "Open the affected paper and resolve it without blocking internal writing.")}</span></button> : null}
               <MatrixAnalysisStatus key={projectId} papers={papers} projectId={projectId} busy={enrichmentActive || Boolean(payload.blueprint_jobs?.some(job => jobIsActive(job.status)))} refresh={refresh} recoveryJobId={enrichmentFailed && hasRecoveryCheckpoint && enrichmentJob?.error_code === "STATE_CONFLICT" && enrichmentJob.available_actions?.includes("retry") ? enrichmentJob.id : undefined} />
             </div></div></div>
             <div className="matrix-list-notices" aria-live="polite">
@@ -567,12 +644,12 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
               {enrichmentFailed ? <div className="message message-error matrix-enrichment-error"><strong>{enrichmentJob?.error_message === "模型服务响应超时，已完成内容已保留。" ? text("模型服务响应超时，已完成内容已保留。", "The model service timed out. Completed content has been retained.") : enrichmentJob?.error_code === "STATE_CONFLICT" && hasRecoveryCheckpoint ? text("事实已经提取，但尚未显示在文献分析中。", "Facts were extracted but have not appeared in Paper analysis.") : text("上次科学事实分析未完成。", "The previous scientific fact analysis did not finish.")}</strong><p>{enrichmentJob?.error_message === "模型服务响应超时，已完成内容已保留。" ? text("点击“继续未完成分析”恢复。", "Choose Resume unfinished analysis to continue.") : enrichmentJob?.error_code === "STATE_CONFLICT" && hasRecoveryCheckpoint ? text("任务期间论文分析状态发生变化。点击“继续未完成分析”可复用检查点，不会重新调用模型。", "Paper analysis changed during the job. Recover the checkpoint without calling the model again.") : text("生成章节规划时会自动重新分析；该问题不会阻止继续规划。", "Chapter planning will analyze the evidence again automatically; this does not block planning.")}</p>{enrichmentJob?.error_message && enrichmentJob.error_message !== "模型服务响应超时，已完成内容已保留。" ? <details><summary>{text("技术详情", "Technical details")}</summary><p>{enrichmentJob.error_message}</p></details> : null}</div> : null}
             </div>
             <input className="pane-search" type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={text("搜索论文", "Search papers")} />
-            <div className="paper-list">{visiblePapers.map((paper) => { const status = analysisState(paper, activeFactPaperIds.has(paper.paper_id)); return <button type="button" key={paper.paper_id} title={text(`内部论文 ID：${paper.paper_id}；事实状态：${factStatusLabel(status, text)}`, `Internal paper ID: ${paper.paper_id}; fact status: ${factStatusLabel(status, text)}`)} className={paper.paper_id === selected?.paper_id ? "paper-row active" : "paper-row"} onClick={() => setSelectedId(paper.paper_id)}><span className="paper-row-main"><strong>{paperLabels.get(paper.paper_id) || paper.paper_id} · {displayText(paper.title)}</strong><small>{paper.authors?.join(", ")}</small></span><span className={`status-pill ${factStatusClass(status)}`}>{factStatusLabel(status, text)}</span></button>; })}</div>
+            <div className="paper-list">{visiblePapers.map((paper) => { const status = analysisState(paper, activeFactPaperIds.has(paper.paper_id)); return <button type="button" key={paper.paper_id} title={text(`内部论文 ID：${paper.paper_id}；事实状态：${factStatusLabel(status, text, readingCompleted(paper))}`, `Internal paper ID: ${paper.paper_id}; fact status: ${factStatusLabel(status, text, readingCompleted(paper))}`)} className={paper.paper_id === selected?.paper_id ? "paper-row active" : "paper-row"} onClick={() => setSelectedId(paper.paper_id)}><span className="paper-row-main"><strong>{paperLabels.get(paper.paper_id) || paper.paper_id} · {displayText(paper.title)}</strong><small>{paper.authors?.join(", ")}</small></span><span className={`status-pill ${factStatusClass(status)}`}>{factStatusLabel(status, text, readingCompleted(paper))}</span></button>; })}</div>
           </section>
           <section className="pane planning-detail-pane">
 
             {selected?.bibliography_identity?.verified === false ? <><div className="detail-status-notice warning planning-bibliography-notice" role="status"><strong>{text("规范书目信息待核验", "Canonical bibliography pending")}</strong><p>{selected.bibliography_identity.missing_fields?.length ? text(`待补字段：${selected.bibliography_identity.missing_fields.join("、")}。可继续内部写作，但终稿发布前需要解决。`, `Missing fields: ${selected.bibliography_identity.missing_fields.join(", ")}. Internal writing may continue, but this must be resolved before release.`) : text("题名、期刊、年份或 DOI 尚未完成核验。该论文仍可用于文献分析和内部写作，但终稿发布前需要确认。", "The title, venue, year, or DOI is not yet verified. The paper remains usable in Paper analysis and internal writing, but must be confirmed before Final release.")}</p></div><BibliographyResolutionPanel paper={selected} onChanged={refresh} /></> : null}
-            {selected ? <><div className="pane-head paper-title"><div><span className="step-label" title={text(`内部论文 ID：${selected.paper_id}`, `Internal paper ID: ${selected.paper_id}`)}>{paperLabels.get(selected.paper_id) || selected.paper_id}</span><h2>{displayText(selected.title)}</h2><p>{[selected.authors?.join(", "), selected.year, selected.journal, selected.doi].filter(Boolean).join(" · ")}</p></div><span className={`status-pill ${factStatusClass(selectedFactStatus)}`}>{factStatusLabel(selectedFactStatus, text)}</span></div><div className="planning-detail-content"><MatrixAnalysisStatus key={selected.paper_id} paper={selected} papers={papers} projectId={projectId} busy={enrichmentActive || Boolean(payload.blueprint_jobs?.some((job) => jobIsActive(job.status)))} refresh={refresh} />{selected.fact_enrichment?.processing ? <p className="message message-info">{text(`已核验 ${selected.fact_enrichment.verified_fact_count || 0} 条 · 待核验 ${selected.fact_enrichment.pending_fact_count || 0} 条`, `${selected.fact_enrichment.verified_fact_count || 0} checked · ${selected.fact_enrichment.pending_fact_count || 0} awaiting verification`)}{selected.fact_enrichment.processing.verification === "pending" ? text("。当前章节规划任务可从已有检查点继续核验，已完成事实会保留。", ". The current chapter-planning task can resume verification from its checkpoint; completed facts are retained.") : null}</p> : null}<section className="reading-field"><h3>{text("摘要", "Abstract")}</h3><p>{displayText(selected.abstract) || text("没有摘要。", "No abstract available.")}</p></section><section className="matrix-fact-section"><MatrixEvidenceUse paper={selected} /><h3>{text("已核验事实依据", "Verified source-grounded facts")}</h3>{formalClassificationTags.length ? <div className="message message-success"><strong>{text("正式证据分类", "Formal evidence classification")}</strong><p>{formalClassificationTags.map((tag) => `${tag.axis_label || tag.axis_id}: ${tag.partition_label || tag.partition_id}`).join(" · ")}</p><small>{text("每个正式分类均绑定事实 ID 与原文证据；阶段 02 初步分组不会直接用于正文 Claim。", "Every formal tag is bound to fact IDs and source evidence. Stage 02 grouping cannot directly support manuscript Claims.")}</small></div> : null}{actionRequiredOutcomes.length ? <div className="message message-warning"><strong>{text("仍需处理的分类问题", "Classification issues still requiring attention")}</strong><p>{actionRequiredOutcomes.map((outcome) => `${outlineAxisLabel(String(outcome.axis_id || ""), text)}: ${outcome.status}${outcome.reason ? ` — ${outcome.reason}` : ""}`).join(" · ")}</p></div> : null}{!formalClassificationTags.length && provisionalClassificationTags.length ? <p className="message message-info">{text("阶段 02 有初步分组，但尚未通过全文事实验证，因此只作为检索提示。", "Stage 02 has preliminary grouping, but it has not passed full-text fact validation and remains a retrieval hint only.")}</p> : null}{selected.topic_partition_classification?.status === "classified" ? <div className="message message-success"><strong>{text(`Topic 分区：${selected.topic_partition_classification.partition}`, `Topic partition: ${selected.topic_partition_classification.partition}`)}</strong><p>{text(`证据约束分类置信度 ${Math.round(Number(selected.topic_partition_classification.confidence || 0) * 100)}%。`, `Evidence-bound classification confidence ${Math.round(Number(selected.topic_partition_classification.confidence || 0) * 100)}%.`)}</p>{selected.topic_partition_classification.support_excerpt ? <details><summary>{text("查看分类原文依据", "View classification evidence")}</summary><blockquote>{selected.topic_partition_classification.support_excerpt}</blockquote><small>{selected.topic_partition_classification.evidence_ceiling}</small></details> : null}</div> : null}{(automaticallyHandledOutcomes.length || unresolvedTopicPartition) ? <details className="advanced-panel matrix-auto-resolution"><summary>{text("系统已自动处理分类边界（无需操作）", "Classification boundaries handled automatically (no action needed)")}</summary><div className="advanced-panel-body"><p>{text("系统已执行定向补证；仍无正面证据的维度不会被强制归类，论文会按已证实的反应、产物或方法事实自动路由，不影响后续写作。", "The system ran a targeted evidence check. Dimensions still lacking positive evidence are not forced; the paper is routed by verified reaction, product, or method facts without blocking writing.")}</p>{automaticallyHandledOutcomes.length ? <ul>{automaticallyHandledOutcomes.map((outcome) => <li key={`${outcome.axis_id}-${outcome.status}`}><strong>{outlineAxisLabel(String(outcome.axis_id || ""), text)}</strong>: {outcome.reason || outcome.status}</li>)}</ul> : null}{unresolvedTopicPartition && selected.topic_partition_classification.boundary_reason ? <p>{selected.topic_partition_classification.boundary_reason}</p> : null}</div></details> : null}{selected?.fact_enrichment?.status === "limited" ? <p className="message message-warning">{text("当前只有摘要级证据，不能据此扩展实验条件、机理或详细定量结论。", "Only abstract-level evidence is available; do not extend it into detailed conditions, mechanisms, or quantitative claims.")}</p> : null}{facts.length ? <div className="matrix-fact-list">{facts.map((fact) => { const ref = fact.evidence_refs?.[0]; const support = fact.support_level || (fact.epistemic_status === "abstract_level_report" ? "abstract_limited" : "direct"); return <article key={fact.fact_id || `${fact.field_id}-${ref?.chunk_id}`}><div><strong>{String(fact.field_id || "fact").replaceAll("_", " ")}</strong><span>{text(`支持：${support === "direct" ? "直接证据" : support === "abstract_limited" ? "仅摘要" : "仅上下文"}`, `Support: ${support.replaceAll("_", " ")}`)} · {ref?.page_start ? text(`第 ${ref.page_start} 页`, `Page ${ref.page_start}`) : fact.source_channel || fact.epistemic_status}</span></div><p>{fact.value}</p><details><summary>{text("查看原文依据与证据上限", "View source support and evidence ceiling")}</summary><blockquote>{fact.support_excerpt}</blockquote><small>{fact.assertion_ceiling || fact.evidence_ceiling}</small></details></article>; })}</div> : <p className="muted">{emptyFactMessage}</p>}</section><details className="advanced-panel matrix-reading-advanced"><summary>{text("全文阅读笔记与图像信息（可选）", "Full-text notes and figure data (optional)")}</summary><div className="advanced-panel-body"><section className="reading-field"><h3>{text("全文阅读笔记", "Full-text reading notes")}</h3><textarea rows={14} value={note} onChange={(event) => setNote(event.target.value)} placeholder={text("转化、条件、证据、范围、限制与综述相关性", "Transformation, conditions, evidence, scope, limitations, and relevance")} /></section><label className="check-label"><input type="checkbox" checked={complete} onChange={(event) => setComplete(event.target.checked)} />{text("已完成该论文全文阅读", "Full-text reading completed")}</label><button className="button button-primary" type="button" disabled={saveReading.isPending} onClick={() => saveReading.mutate()}>{saveReading.isPending ? text("保存中…", "Saving…") : text("保存阅读笔记", "Save reading notes")}</button>{saveReading.error ? <p className="message message-error">{saveReading.error.message}</p> : null}<details className="figure-data"><summary>{text("最相关图像信息", "Most relevant figure")}</summary><pre>{JSON.stringify(selected.most_relevant_figure || {}, null, 2)}</pre></details></div></details></div></> : <div className="empty-state">{text("Discovery确认后会在这里显示Matrix。", "The matrix appears here after Discovery is confirmed.")}</div>}
+            {selected ? <><div className="pane-head paper-title"><div><span className="step-label" title={text(`内部论文 ID：${selected.paper_id}`, `Internal paper ID: ${selected.paper_id}`)}>{paperLabels.get(selected.paper_id) || selected.paper_id}</span><h2>{displayText(selected.title)}</h2><p>{[selected.authors?.join(", "), selected.year, selected.journal, selected.doi].filter(Boolean).join(" · ")}</p></div><span className={`status-pill ${factStatusClass(selectedFactStatus)}`}>{factStatusLabel(selectedFactStatus, text, readingCompleted(selected))}</span></div><div className="planning-detail-content"><MatrixAnalysisStatus key={selected.paper_id} paper={selected} papers={papers} projectId={projectId} busy={enrichmentActive || Boolean(payload.blueprint_jobs?.some((job) => jobIsActive(job.status)))} refresh={refresh} /><MatrixReadingStatus paper={selected} /><MatrixPaperGuide paper={selected} /><section className="reading-field"><h3>{text("摘要", "Abstract")}</h3><p>{displayText(selected.abstract) || text("没有摘要。", "No abstract available.")}</p></section><section className="matrix-fact-section"><MatrixEvidenceUse paper={selected} />{formalClassificationTags.length ? <div className="message message-success"><strong>{text("正式证据分类", "Formal evidence classification")}</strong><p>{formalClassificationTags.map((tag) => `${tag.axis_label || tag.axis_id}: ${tag.partition_label || tag.partition_id}`).join(" · ")}</p><small>{text("每个正式分类均绑定事实 ID 与原文证据；阶段 02 初步分组不会直接用于正文 Claim。", "Every formal tag is bound to fact IDs and source evidence. Stage 02 grouping cannot directly support manuscript Claims.")}</small></div> : null}{actionRequiredOutcomes.length ? <div className="message message-warning"><strong>{text("仍需处理的分类问题", "Classification issues still requiring attention")}</strong><p>{actionRequiredOutcomes.map((outcome) => `${outlineAxisLabel(String(outcome.axis_id || ""), text)}: ${outcome.status}${outcome.reason ? ` — ${outcome.reason}` : ""}`).join(" · ")}</p></div> : null}{!formalClassificationTags.length && provisionalClassificationTags.length ? <p className="message message-info">{text("阶段 02 有初步分组，但尚未通过全文事实验证，因此只作为检索提示。", "Stage 02 has preliminary grouping, but it has not passed full-text fact validation and remains a retrieval hint only.")}</p> : null}{selected.topic_partition_classification?.status === "classified" ? <div className="message message-success"><strong>{text(`Topic 分区：${selected.topic_partition_classification.partition}`, `Topic partition: ${selected.topic_partition_classification.partition}`)}</strong><p>{text(`证据约束分类置信度 ${Math.round(Number(selected.topic_partition_classification.confidence || 0) * 100)}%。`, `Evidence-bound classification confidence ${Math.round(Number(selected.topic_partition_classification.confidence || 0) * 100)}%.`)}</p>{selected.topic_partition_classification.support_excerpt ? <details><summary>{text("查看分类原文依据", "View classification evidence")}</summary><blockquote>{selected.topic_partition_classification.support_excerpt}</blockquote><small>{selected.topic_partition_classification.evidence_ceiling}</small></details> : null}</div> : null}{(automaticallyHandledOutcomes.length || unresolvedTopicPartition) ? <details className="advanced-panel matrix-auto-resolution"><summary>{text("系统已自动处理分类边界（无需操作）", "Classification boundaries handled automatically (no action needed)")}</summary><div className="advanced-panel-body"><p>{text("系统已执行定向补证；仍无正面证据的维度不会被强制归类，论文会按已证实的反应、产物或方法事实自动路由，不影响后续写作。", "The system ran a targeted evidence check. Dimensions still lacking positive evidence are not forced; the paper is routed by verified reaction, product, or method facts without blocking writing.")}</p>{automaticallyHandledOutcomes.length ? <ul>{automaticallyHandledOutcomes.map((outcome) => <li key={`${outcome.axis_id}-${outcome.status}`}><strong>{outlineAxisLabel(String(outcome.axis_id || ""), text)}</strong>: {outcome.reason || outcome.status}</li>)}</ul> : null}{unresolvedTopicPartition && selected.topic_partition_classification.boundary_reason ? <p>{selected.topic_partition_classification.boundary_reason}</p> : null}</div></details> : null}{selected?.fact_enrichment?.status === "limited" ? <p className="message message-warning">{text("当前只有摘要级证据，不能据此扩展实验条件、机理或详细定量结论。", "Only abstract-level evidence is available; do not extend it into detailed conditions, mechanisms, or quantitative claims.")}</p> : null}<MatrixFactRecords paper={selected} emptyMessage={emptyFactMessage} /></section><details className="advanced-panel matrix-reading-advanced"><summary>{text("全文阅读笔记与图像信息（可选）", "Full-text notes and figure data (optional)")}</summary><div className="advanced-panel-body"><section className="reading-field"><h3>{text("全文阅读笔记", "Full-text reading notes")}</h3><textarea rows={14} value={note} onChange={(event) => setNote(event.target.value)} placeholder={text("转化、条件、证据、范围、限制与综述相关性", "Transformation, conditions, evidence, scope, limitations, and relevance")} /></section><label className="check-label"><input type="checkbox" checked={complete} onChange={(event) => setComplete(event.target.checked)} />{text("已完成该论文全文阅读", "Full-text reading completed")}</label><button className="button button-primary" type="button" disabled={saveReading.isPending} onClick={() => saveReading.mutate()}>{saveReading.isPending ? text("保存中…", "Saving…") : text("保存阅读笔记", "Save reading notes")}</button>{saveReading.error ? <p className="message message-error">{saveReading.error.message}</p> : null}<details className="figure-data"><summary>{text("最相关图像信息", "Most relevant figure")}</summary><pre>{JSON.stringify(selected.most_relevant_figure || {}, null, 2)}</pre></details></div></details></div></> : <div className="empty-state">{text("Discovery确认后会在这里显示Matrix。", "The matrix appears here after Discovery is confirmed.")}</div>}
           </section>
         </div>
       ) : (
@@ -600,13 +677,12 @@ function MatrixWorkspace({ payload, projectId, refresh, mode }: { payload: Plann
             <button className="button button-primary" type="button" {...outlineChoiceProps(String(topicOutlineCandidate.outline_style || "topic-guided"))}>{outlineChoiceText(String(topicOutlineCandidate.outline_style || "topic-guided"), text("使用推荐大纲", "Use recommended outline"), text("当前推荐大纲", "Current recommended outline"))}</button>
           </article> : <TopicRecommendationPending projectId={projectId} state={payload.topic_recommendation} refresh={refresh} />}
           {outlineStyles.map((style) => <article key={style.id} className={selectedStyle === style.id ? "outline-card current" : "outline-card"}><span className="outline-card-icon">{style.icon}</span><h3>{text(style.titleZh, style.titleEn)}</h3><p>{text(style.descriptionZh, style.descriptionEn)}</p><button className="button button-secondary" type="button" {...outlineChoiceProps(style.id)}>{outlineChoiceText(style.id, text("使用此结构", "Use this structure"), text("当前选择", "Current selection"))}</button></article>)}
-          <article className={selectedStyle.startsWith("reference:") ? "outline-card outline-reference-card current" : "outline-card outline-reference-card"}>
-            <span className="outline-card-icon">↥</span><h3>{text("上传参考综述", "Upload reference review")}</h3><p>{text("仅学习组织方式；上传后生成候选，不自动替换当前大纲。", "Learn organization only. Uploading creates a candidate without replacing the current outline.")}</p>
-            <details className="outline-card-details"><summary>{text("支持的格式与使用说明", "Formats and usage")}</summary><p>{text("支持 PDF、DOCX、Markdown 和 TXT。系统只借鉴层级与节奏，使用当前主题和论文生成新标题，不复制参考综述内容。", "Supports PDF, DOCX, Markdown and TXT. The system borrows hierarchy and pacing, then creates new headings from your topic and papers without copying source content.")}</p></details>
+          <article className="outline-card outline-reference-card">
+            <span className="outline-card-icon">↥</span><h3>{text("导入参考综述大纲", "Import a reference outline")}</h3><p>{text("提取文档里的章节标题（保留层级）并填入下方编辑器；不会自动保存。", "Extracts the document's section headings with their levels into the editor below; nothing is saved automatically.")}</p>
+            <details className="outline-card-details"><summary>{text("支持的格式与使用说明", "Formats and usage")}</summary><p>{text("支持 PDF、DOCX、Markdown 和 TXT。PDF 走 MinerU 版面解析以还原标题层级；Abstract、Keywords、References、附录等不会被导入；第一个章节固定为 Introduction。", "Supports PDF, DOCX, Markdown and TXT. PDF uses MinerU layout parsing to recover heading levels. Abstract, keywords, references and appendices are not imported, and the first section is always an introduction.")}</p></details>
             {uploadReference.error ? <p className="message message-error"><LocalizedError error={uploadReference.error} /></p> : null}
-            {payload.legacy_reference_outline_count ? <p className="message message-warning">{text(`已隐藏 ${payload.legacy_reference_outline_count} 个旧版参考大纲，因为它们没有通过“只学格式”的内容隔离校验；如需使用，请重新上传原参考综述。`, `${payload.legacy_reference_outline_count} legacy reference outlines were hidden because they did not pass format-only content isolation. Upload the source review again to use it safely.`)}</p> : null}
-            {payload.reference_outline_candidates?.length ? <div className="reference-candidates">{payload.reference_outline_candidates.map((candidate) => { const style = `reference:${candidate.candidate_id}`; return <button key={String(candidate.candidate_id)} className={selectedStyle === style ? "active" : ""} type="button" {...outlineChoiceProps(style)}><strong>{outlineChoiceText(style, String(candidate.source_name || candidate.candidate_id), String(candidate.source_name || candidate.candidate_id))}</strong><small>{text("仅学习组织方式 · 内容来自当前论文", "Organization only · content from current papers")}</small></button>; })}</div> : null}
-            <label className="button button-secondary file-button">{uploadReference.isPending ? text("正在分析格式…", "Analyzing format…") : text("选择参考综述", "Choose reference review")}<input type="file" accept=".pdf,.docx,.md,.txt" disabled={uploadReference.isPending} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) uploadReference.mutate(file); }} /></label>
+            {referenceImportMessage ? <p className="message message-info" role="status">{referenceImportMessage}</p> : null}
+            <label className="button button-secondary file-button">{uploadReference.isPending ? text("正在提取章节…", "Extracting sections…") : text("选择参考综述文档", "Choose reference document")}<input type="file" accept=".pdf,.docx,.md,.txt" disabled={uploadReference.isPending} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (!file) return; if (outlineDirty && !window.confirm(text("导入会覆盖编辑器中尚未保存的大纲内容。继续？", "Importing replaces the unsaved outline in the editor. Continue?"))) return; setReferenceImportMessage(""); uploadReference.mutate(file); }} /></label>
           </article></div>
           <details className="surface scope-contract-editor">
             <summary className="scope-contract-heading">

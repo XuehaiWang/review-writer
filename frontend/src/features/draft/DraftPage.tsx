@@ -18,6 +18,7 @@ import { hasDraftScratch } from "./useDraftScratch";
 import { DraftCompositionPanel, DraftSynthesisStatus, type SynthesisJob } from "./DraftCompositionPanel";
 import { DraftManuscriptFields } from "./DraftManuscriptFields";
 import { EditableManuscript } from "./EditableManuscript";
+import { NarrativeRepetitionNotice, type NarrativeRepetitionReport } from "./NarrativeRepetitionNotice";
 
 type Batch = { id: string; status: string; progress_current: number; progress_total: number; error_message?: string; result?: { coherence_plan?: { status: string }; paragraph_results?: Record<string, { paragraph_id: string; status: string; reason?: string }> } };
 type DraftPayload = { revision: number; draft_artifact_id: string; first_draft_md: string; manuscript_preview_md?: string; paragraphs: DialogueParagraph[];
@@ -29,6 +30,7 @@ type DraftPayload = { revision: number; draft_artifact_id: string; first_draft_m
   sections: DialogueSection[]; section_task_states: Record<string, { id: string; status: string }>;
   paragraph_task_states: Record<string, { id: string; status: string; batch: boolean }>;
   quality: ApprovalQuality; quality_artifact_id: string; draft_approval_current: boolean;
+  narrative_repetition?: NarrativeRepetitionReport;
   rewrite_candidates: (DialogueCandidate & { revision_mode?: string; base_text_sha256?: string })[]; dialogue_batch_job?: Batch;
   freshness: { upstream_stale: boolean; editing_blocked?: boolean }; versions: { artifact_id: string; current: boolean; operation: string; created_at: string }[] };
 
@@ -193,6 +195,7 @@ function DraftWorkspace({ projectId, userId }: { projectId: string; userId: stri
             <div><span className="step-label">{text("全文检查", "Manuscript review")}</span><h3>{text("批量分析与优化", "Batch analysis and revision")}</h3><p>{text("系统提出修改建议，原文不会自动替换；审阅后再保存。", "The system proposes changes without replacing saved text. Review before saving.")}</p></div>
             <button className="button button-primary" disabled={activeBatch || batch.isPending || data.freshness.upstream_stale} onClick={() => batch.mutate()}>{batch.isPending ? text("正在提交…", "Submitting…") : text("开始批量分析优化", "Start batch revision")}</button>
           </section>
+          <NarrativeRepetitionNotice report={data.narrative_repetition} onSelect={choose} />
           {batchJob ? <section className="draft-batch-status" role="status">
             <div className="draft-batch-status-head"><div><strong>{batchStatus}</strong><span>{batchJob.progress_current}/{batchJob.progress_total || data.paragraphs.length} {text("段已处理", "paragraphs processed")}</span></div><div className="draft-batch-status-actions">
               {activeBatch ? <button className="button button-secondary" disabled={cancel.isPending} onClick={() => cancel.mutate()}>{text("取消任务", "Cancel task")}</button> : null}

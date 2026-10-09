@@ -29,7 +29,7 @@ ASSERTION_CEILING_ORDER = (
     "direct_report_with_local_context",
     "direct_source_report",
 )
-FACT_PROMPT_VERSION = "fact-extraction/7"
+FACT_PROMPT_VERSION = "fact-extraction/8"
 
 # One writing/comparison policy for Blueprint, Sections and Draft evaluation.
 # This permits synthesis, not unverified aliases or new experimental facts.
@@ -397,12 +397,59 @@ def merge_facts(*groups: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             identity = fact_identity(fact)
             previous = result.get(identity)
+            if (previous and (previous.get("human_checked") or previous.get("revision_of_fact_id"))
+                    and not fact.get("human_checked") and not fact.get("revision_of_fact_id")
+                    and not fact.get("correction_of_fact_id")):
+                # Automatic re-reading cannot replace a user's relation revision.
+                continue
+            if (previous and not fact.get("revision_of_fact_id") and not fact.get("correction_of_fact_id")
+                    and (previous.get("verification") or {}).get("contract") == FACT_VALIDATION_VERSION
+                    and (previous.get("verification") or {}).get("status") == "supported"
+                    and verification_matches(previous)
+                    and (fact.get("verification") or {}).get("status") in {None, "pending", "unavailable"}
+                    and review_fingerprint(previous) == review_fingerprint(fact)):
+                # A new navigation candidate cannot downgrade an identical audited
+                # relation. The full fingerprint includes ownership, unlike its ID.
+                continue
             # An extraction of the exact same proposition must not erase a
             # completed relation audit. Changed values/sources have another ID.
             if previous and (previous.get("verification") or {}).get("contract") == FACT_VALIDATION_VERSION and not fact.get("verification"):
                 continue
             result[identity] = dict(fact)
     return list(result.values())
+
+
+def fact_display_signals(
+    facts: Iterable[Mapping[str, Any]] | None,
+    *,
+    pending_revision_fact_ids: Iterable[Any] | None = None,
+) -> dict[str, bool]:
+    """Summarize the two per-paper fact checks the Planning list displays.
+
+    The paper list shows one status per paper but must not carry every fact card
+    (a single paper's cards and comparison evidence can exceed 150 KB). These
+    booleans let the list reach the same status without the records, so keep them
+    in step with ``hasPendingFactRevision`` and the ``limitedFacts`` scan in
+    ``frontend/src/features/planning/MatrixAnalysisStatus.tsx``.
+    """
+    pending = bool(list(pending_revision_fact_ids or ()))
+    limited = False
+    for fact in facts or ():
+        if not isinstance(fact, Mapping):
+            continue
+        status = str((fact.get("verification") or {}).get("status") or "")
+        if (
+            str(fact.get("revision_of_fact_id") or "")
+            and not str(fact.get("superseded_by_fact_id") or "")
+            and status not in {"supported", "uncertain", "rejected"}
+        ):
+            pending = True
+        if str(fact.get("support_level") or "") == "context_only" or status in {
+            "uncertain",
+            "rejected",
+        }:
+            limited = True
+    return {"has_pending_revision": pending, "has_limited_fact": limited}
 
 
 def fact_is_classification(fact: Mapping[str, Any]) -> bool:
@@ -413,18 +460,32 @@ def fact_is_classification(fact: Mapping[str, Any]) -> bool:
 def fact_usage(fact: Mapping[str, Any]) -> str:
     """One policy for planning, comparison, chapter binding and coverage.
 
-    Legacy source-bound cards remain readable. Newly extracted cards require
-    their relation audit. Classification evidence is never a scientific result.
-    Abstract reports may support attribution, not detailed claims/comparisons.
+    Source-bound cards that have not yet passed their relation audit are
+    ``navigation``: usable for locating passages and background guidance, never
+    as directly citable details. The claim-level source check remains the
+    authority for what is actually written. Classification evidence is never a
+    scientific result. Abstract reports may support attribution, not detailed
+    claims/comparisons.
     """
     verification = fact.get("verification") or {}
     if (fact.get("superseded_by_fact_id") or not fact.get("value") or not fact.get("evidence_refs")
-            or fact.get("support_level") in {"context_only", "coverage_only", "neighbor_context"}
-            or verification.get("status") in {"rejected", "pending", "unavailable", "uncertain"}
-            or (fact.get("validation_contract") and verification.get("status") != "supported")):
+            or fact.get("support_level") in {"coverage_only", "neighbor_context"}
+            or verification.get("status") in {"rejected", "unavailable"}
+            or verification.get("source_damage")):
         return "unusable"
     if fact_is_classification(fact):
         return "classification"
+    pending_audit = (
+        verification.get("status") in {"pending", "uncertain"}
+        or fact.get("support_level") == "context_only"
+        or (fact.get("validation_contract") and verification.get("status") != "supported")
+        or ((fact.get("extraction") or {}).get("reading_strategy")
+            and (fact.get("validation_contract") != FACT_VALIDATION_VERSION
+                 or verification.get("contract") != FACT_VALIDATION_VERSION
+                 or not verification_matches(fact)))
+    )
+    if pending_audit:
+        return "navigation"
     if (fact.get("support_level") == "abstract_limited" or fact.get("source_channel") == "abstract"
             or fact.get("epistemic_status") == "abstract_level_report"
             or fact.get("assertion_ceiling") == "abstract_report_only"
@@ -437,7 +498,7 @@ def fact_is_usable(fact: Mapping[str, Any], *, purpose: str = "background") -> b
     if purpose not in {"background", "detail"}:
         raise ValueError(f"Unknown fact use: {purpose}")
     usage = fact_usage(fact)
-    return usage == "direct" or (purpose == "background" and usage == "background")
+    return usage == "direct" or (purpose == "background" and usage in {"background", "navigation"})
 
 
 def fact_assertion_texts(fact: Mapping[str, Any]) -> list[str]:
@@ -522,9 +583,10 @@ def attach_fact_to_evidence(evidence: dict[str, Any], fact: Mapping[str, Any]) -
     fid = str(fact.get("fact_id") or fact_identity(fact))
     bindings[fid] = {"fact_id": fid, **{key: fact.get(key) for key in (
         "paper_id", "field_id", "fact_type", "value", "subject", "predicate", "experiment_id", "qualifiers",
-        "epistemic_status", "assertion_ceiling", "evidence_refs", "support_spans", "support_excerpt",
+        "normalized_value", "unit", "classification_axis_id", "classification_partition_id", "revision_assertion_ceiling",
+        "study_ownership", "epistemic_status", "evidence_ceiling", "assertion_ceiling", "evidence_refs", "support_spans", "support_excerpt",
         "support_level", "source_channel", "verification", "validation_contract"
-    )}}
+    ) if key in fact}}
     bindings[fid]["usage"] = fact_usage(fact)
     bindings[fid]["paper_id"] = fact.get("paper_id") or evidence.get("paper_id")
     evidence["fact_bindings"] = list(bindings.values())
@@ -562,6 +624,27 @@ def registered_fact_bindings(evidence: Iterable[Mapping[str, Any]], allowed_pape
                 ambiguous.add(fid)
             registry[fid] = canonical
     return {fid: value for fid, value in registry.items() if fid not in ambiguous}
+
+
+def writing_fact_guidance(fact: Mapping[str, Any]) -> dict[str, Any]:
+    """Compact display of a full registered binding, never itself a fact registry.
+
+    Both budgeting and writing use this projection. Validate the complete fact
+    before dropping quotes and audit metadata; never validate the display copy.
+    """
+    if not fact_is_usable(fact):
+        return {}
+    return {
+        "fact_id": str(fact.get("fact_id") or ""),
+        "field_id": str(fact.get("field_id") or ""),
+        "value": str(fact.get("value") or ""),
+        "usage": fact_usage(fact),
+        "study_ownership": fact.get("study_ownership", "unknown"),
+        **{key: deepcopy(fact[key]) for key in
+           ("subject", "predicate", "experiment_id", "qualifiers", "epistemic_status", "source_channel")
+           if fact.get(key)},
+        "assertion_ceiling": str(fact.get("assertion_ceiling") or fact.get("evidence_ceiling") or ""),
+    }
 
 
 def writable_evidence_keys(evidence: Iterable[Mapping[str, Any]], allowed_papers: Iterable[str]) -> set[str]:

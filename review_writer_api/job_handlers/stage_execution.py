@@ -52,8 +52,8 @@ def wait_for_delegated_model(context, result: dict | None) -> None:
         raise WorkflowConflict("The delegated model task is unavailable.")
     if all(job.status in {"queued", "running"} for job in jobs):
         raise JobYieldRequested(delay_seconds=10, queue_reason="model_waiting")
-    # Parallel sections must consume each ready result independently. A failed
-    # child is surfaced by its own chapter; don't discard successful siblings.
+    # Parallel chapters/papers consume each ready result independently. A
+    # failed child is surfaced by its own item; retain successful siblings.
     if len(jobs) > 1:
         return
     model_job = jobs[0]
@@ -205,6 +205,7 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
             if integration.get("enabled") and enrichment_builder is not None:
                 fact_payload = planning_service.matrix_enrichment_payload(
                     principal, str(context.project_id),
+                    reading_strategy=payload.get("reading_strategy"),
                     classification_contract_override=selected_formal_classification_contract(
                         payload.get("outline_snapshot")
                     ),
@@ -274,6 +275,12 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                                     source["planning_source_passages"]
                                 )
                         payload["planning_matrix_snapshot"] = planning_matrix
+                        if payload.get("reading_strategy"):
+                            # New reading candidates can reference passages that
+                            # did not exist in the earlier planning projection.
+                            # Resolve them into a new model-only snapshot.
+                            payload["planning_matrix_snapshot"] = planning_service.planning_matrix_with_sources(
+                                principal, candidate["matrix_snapshot"], reading_strategy=payload["reading_strategy"])
                         fact_result = {
                             "status": "completed",
                             "mode": integration.get("mode"),
@@ -373,6 +380,7 @@ def register_planning_handlers(planning_service, job_service, handlers: Mapping[
                     source_matrix_artifact_id=expected_artifact_id) if payload.get("operation") == "fact_revision"
                     else planning_service.matrix_enrichment_payload(principal, str(context.project_id),
                         force=bool(request.get("force_refresh")),
+                        reading_strategy=request.get("reading_strategy"),
                         selected_paper_ids=request.get("selected_paper_ids") or None))
                 if (
                     expected_artifact_id

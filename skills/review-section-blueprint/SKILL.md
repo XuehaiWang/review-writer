@@ -120,11 +120,20 @@ Repeated assignments in later body sections become `supporting_papers` and
 must not trigger a second full paper description.
 Every body section needs a research question and provisional writing objective.
 Evidence gaps remain open questions; they do not trigger a second fact-extraction loop after planning.
+When Matrix rows exist but a body range has no primary or supporting papers,
+record it as a scope-coverage gap instead of keeping an empty draft chapter.
+Context-only assignment does not establish direct support. Adding relevant
+papers and rerunning planning may restore that range as a chapter.
 Every selected paper has a role or a specific unused_papers reason confirmed with the candidate.
 Every section must have figure_or_table_needs, or explicitly state no figure/table is useful.
 The blueprint is a plan, not prose. Keep it compact and enforceable.
 The assignment policy is domain-independent. Do not hard-code topic names,
 paper IDs, catalyst classes, diseases, materials, or other subject entities.
+
+Planning execution and plan completeness are separate facts. A successful task
+may still report incomplete writable chapters or ranges without supporting
+papers; name the affected chapters and do not present a missing-literature
+range as a failed model call.
 ```
 
 Stop after blueprint for human check if interactive.

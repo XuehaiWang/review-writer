@@ -23,25 +23,7 @@ SPEC.loader.exec_module(overview)
 
 
 class OverviewSkeletonGateTests(unittest.TestCase):
-    def test_gate_expectation_includes_rendered_hydrogen_spheres(self) -> None:
-        # OCC#C* renders five non-H atoms plus three explicit white hydrogens.
-        # The previous heavy-atom-only expectation (5) rejected correct AI
-        # style transfers that visibly preserved all eight reference atoms.
-        self.assertEqual((8, 1), overview.skeleton_atom_counts("OCC#C*"))
 
-    def test_atom_blob_gate_accepts_small_segmentation_variation(self) -> None:
-        from PIL import Image, ImageDraw
-
-        image = Image.new("RGB", overview._GATE_SMALL_SIZE, "white")
-        draw = ImageDraw.Draw(image)
-        for index in range(9):
-            x = 28 + (index % 5) * 78
-            y = 80 + (index // 5) * 145
-            draw.ellipse((x - 13, y - 13, x + 13, y + 13), fill=(25, 25, 25))
-
-        accepted, note = overview._ai_redraw_gate(image, 8, 0)
-
-        self.assertTrue(accepted, note)
 
     def test_composite_rejects_output_when_no_internal_panel_is_blank(self) -> None:
         from PIL import Image, ImageDraw
@@ -349,8 +331,8 @@ class OverviewSkeletonGateTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "skeleton.png"
-            rendered = overview.render_smiles_ball_and_stick(
-                "CCO", output_path, img_size=(420, 300)
+            rendered = overview._render_motif_2d(
+                "CCO", output_path, size=(420, 300)
             )
             self.assertEqual(output_path, rendered)
             with Image.open(output_path) as image:

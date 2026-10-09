@@ -124,7 +124,7 @@ export function SectionDialogue({ section, projectId, userId, blocked, candidate
       <div className="chapter-chat-messages" ref={logRef} role="region" aria-label={text("章节聊天记录", "Chapter conversation")}
         onScroll={() => { const log = logRef.current; if (log) { atBottom.current = log.scrollHeight - log.scrollTop - log.clientHeight < 60; if (atBottom.current) setNewReply(false); } }}>
         {history.isPending ? <p role="status">{text("正在加载对话…", "Loading conversation…")}</p> : null}
-        {!turns.length && !history.isPending ? <div className="chapter-chat-empty"><h3>{text("一起完善这一章", "Let's refine this chapter")}</h3><p>{text("直接告诉 AI 你的想法。它会参考本章正文与论文证据，回复建议或生成修改，保存由你决定。", "Share your ideas. The AI uses this chapter and source evidence to discuss or propose changes. You choose what to save.")}</p></div> : null}
+        {!turns.length && !history.isPending ? <div className="chapter-chat-empty"><h3>{text("一起完善这一章", "Let's refine this chapter")}</h3><p>{text("可以讨论本章，也可以要求与其他章节比较或衔接。AI 会按需参考其他章节已保存的相关段落；修改仅针对本章，由你决定是否采用。", "Discuss this chapter or compare and connect it with others. AI can consult relevant saved passages from other chapters; proposed changes stay within this chapter, and you choose whether to accept them.")}</p></div> : null}
         {turns.length > historyLimit ? <button className="button button-quiet" onClick={() => {
           const log = logRef.current; if (log) olderScroll.current = { height: log.scrollHeight, top: log.scrollTop };
           setHistoryLimit(n => n + 5);

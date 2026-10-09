@@ -32,7 +32,10 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from review_writer_core.atomic_io import atomic_write_json as write_json  # noqa: E402
 from review_writer_core.providers import (  # noqa: E402
+    decode_json_object,
+    load_dotenv,
     DEFAULT_IMAGE_MODEL,
     DEFAULT_OPENAI_BASE_URL,
     normalize_wire_api as _shared_normalize_wire_api,
@@ -85,6 +88,41 @@ MIN_UNMATCHED_OUTPUT_INK_PIXELS = 64
 MAX_UNMATCHED_SOURCE_INK_RATIO = 0.03
 MIN_UNMATCHED_SOURCE_INK_PIXELS = 64
 DEFAULT_STYLE_NAME = "organic-review-structure-locked-v2"
+# The palette is orthogonal to the style: "source" keeps whatever colour the
+# source used (with the existing semantic-colour rules), "monochrome" renders
+# every redrawn figure in greyscale.  The switch exists so a deployment can go
+# back to the previous behaviour without touching code.
+FIGURE_PALETTES = ("monochrome", "source")
+DEFAULT_FIGURE_PALETTE = "monochrome"
+MONOCHROME_PALETTE_OVERRIDE = (
+    " PALETTE OVERRIDE (takes priority over every preceding colour instruction): output greyscale only — "
+    "black strokes on a pure white background with neutral antialiasing, and never any colour. Convert every "
+    "coloured label, arrow, atom, bond, legend entry, data series, fill and marker to black. Where colour used "
+    "to carry a distinction, express it with line style, hatching, marker shape, or text instead."
+)
+MONOCHROME_PROMPT_REPLACEMENTS = (
+    (
+        "Preserve every coloured word, glyph, letter, number, and label as a solid, continuous, crisp stroke in "
+        "its original colour; never hollow, fade, perforate, blur, or break coloured text while removing a large "
+        "shape fill.",
+        "Render every word, glyph, letter, number, and label as a solid, continuous, crisp black stroke; never "
+        "hollow, fade, perforate, blur, or break text while removing a large shape fill.",
+    ),
+    (
+        "Improve colour consistency, white background, edge continuity, and legibility only.",
+        "Improve stroke consistency, white background, edge continuity, and legibility only.",
+    ),
+    ("Improve colour balance and edge clarity only.", "Improve edge continuity only."),
+    (
+        "Retain colours only when they encode arrow classes, data series, atom identity, or scientific meaning.",
+        "Render arrow classes, data series, atom labels and symbols in black, and separate them by line style, "
+        "hatching, marker shape, or text.",
+    ),
+    (
+        "together with axes, scales, ticks, legends, colours, error bars, labels, and annotations",
+        "together with axes, scales, ticks, legends, error bars, labels, and annotations",
+    ),
+)
 MECHANISM_ARROW_STRAIGHTEN_PROFILE = "mechanism-arrow-straighten"
 OCR_PAGE_SEGMENTATION_MODE = "3"
 OCR_ASSUMED_DPI = "300"
@@ -136,28 +174,6 @@ _HOLLOW_COLOR_FILL_PATTERN = re.compile(
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def load_dotenv(review_root: Path) -> None:
-    """Load project-local API settings without overriding the process environment."""
-    path = review_root / ".env"
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.removeprefix("export ").strip()
-        if key:
-            os.environ.setdefault(key, value.strip().strip("'\""))
-
-
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
 
 
 def normalize_space(text: str) -> str:
@@ -466,7 +482,6 @@ def restore_missing_source_ink(source_path: Path, output_path: Path) -> dict[str
             output_image = output_image.resize(source_image.size, Image.Resampling.LANCZOS)
         source_ink = ink_mask(source_image).tobytes()
         output_ink_image = ink_mask(output_image)
-        output_ink = output_ink_image.tobytes()
         expanded_output = output_ink_image.filter(ImageFilter.MaxFilter(CONTENT_MATCH_RADIUS * 2 + 1)).tobytes()
         hollow_interiors = enclosed_white_mask(output_ink_image)
         missing = bytes(
@@ -793,6 +808,43 @@ def chromatic_content_metrics(image_path: Path) -> dict[str, Any]:
         "content_size": [content.width, content.height],
         "chromatic_pixels": chromatic_pixels,
         "chromatic_ratio": chromatic_pixels / max(len(pixels), 1),
+    }
+
+
+def to_monochrome(output_path: Path) -> dict[str, Any]:
+    """Convert a redrawn figure to greyscale in place.
+
+    The model is asked for greyscale, but a prompt is a request: this is the
+    step that makes "no other colour" true.  It keeps each pixel's luminance so
+    the neutral antialiasing that makes strokes readable survives.
+    """
+    with Image.open(output_path) as image:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, "white")
+        background.alpha_composite(rgba)
+        greyscale = ImageOps.grayscale(background.convert("RGB"))
+    greyscale.save(output_path, format="PNG")
+    return {
+        "width": greyscale.width,
+        "height": greyscale.height,
+        "conversion": "luminance-preserving greyscale conversion",
+    }
+
+
+def monochrome_palette_check(output_path: Path) -> dict[str, Any]:
+    """Assert a redrawn figure carries no colour at all."""
+    metrics = chromatic_content_metrics(output_path)
+    failures: list[str] = []
+    if metrics["chromatic_pixels"]:
+        failures.append(
+            "the redrawn figure still contains coloured pixels "
+            f"({metrics['chromatic_pixels']} pixels, ratio {metrics['chromatic_ratio']:.4f})"
+        )
+    return {
+        "status": "failed" if failures else "pass",
+        "failures": failures,
+        "output": metrics,
+        "palette": "monochrome",
     }
 
 
@@ -1367,19 +1419,6 @@ def call_with_academic_safety_retry(
         return result
 
 
-def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
-    if not raw.strip():
-        raise RuntimeError(f"{label} returned an empty response body")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        preview = raw.decode("utf-8", "replace")[:300].replace("\r", " ").replace("\n", " ")
-        raise RuntimeError(f"{label} returned non-JSON content: {preview or '<empty>'}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{label} returned JSON {type(data).__name__}, expected an object")
-    return data
-
-
 def open_json_request(request: urllib.request.Request, label: str, timeout: int = 300) -> dict[str, Any]:
     for attempt in range(3):
         retry_delay = GENERIC_TRANSIENT_RETRY_DELAYS[
@@ -1470,11 +1509,24 @@ def figure_type_prompt(figure_type: str) -> str:
     return prompts.get(figure_type, "")
 
 
+def monochrome_prompt(prompt: str) -> str:
+    """Retarget a redraw prompt at greyscale without weakening the chemistry lock."""
+    for source_sentence, replacement in MONOCHROME_PROMPT_REPLACEMENTS:
+        prompt = prompt.replace(source_sentence, replacement)
+    return prompt + MONOCHROME_PALETTE_OVERRIDE
+
+
+def apply_palette(prompt: str, palette: str) -> str:
+    """Return the prompt for one palette; ``source`` keeps today's behaviour."""
+    return monochrome_prompt(prompt) if palette == "monochrome" else prompt
+
+
 def build_prompt(
     style_name: str,
     figure: dict[str, Any],
     ocr_text: str = "",
     figure_type: str = "simple-scheme",
+    palette: str = "source",
 ) -> str:
     ocr_constraint = ""
     if ocr_text.strip():
@@ -1483,7 +1535,7 @@ def build_prompt(
             "do not add, omit, or substitute it. OCR transcription: "
             f"{ocr_text.strip()[:2000]}"
         )
-    return (
+    prompt = (
         "Apply one consistent publication style to the supplied figure: crisp medium-weight black line art, "
         "pure white background, even contrast, clean antialiasing, consistent line caps and arrowheads, and no "
         "decorative gradients, shadows, textures, or grayscale fills. "
@@ -1508,6 +1560,7 @@ def build_prompt(
         "The output must be scientifically and topologically identical to the source. "
         f"Style preset: {style_name}.{figure_type_prompt(figure_type)}{ocr_constraint}"
     )
+    return apply_palette(prompt, palette)
 
 
 def build_ocr_hollow_prompt(
@@ -1515,14 +1568,16 @@ def build_ocr_hollow_prompt(
     figure: dict[str, Any],
     ocr_text: str = "",
     figure_type: str = "simple-scheme",
+    palette: str = "source",
 ) -> str:
-    return (
-        build_prompt(style_name, figure, ocr_text, figure_type)
+    return apply_palette(
+        build_prompt(style_name, figure, ocr_text, figure_type, "source")
         + " The input has all original text regions masked. Do not generate any letters, numbers, labels, or symbols. "
         "Redraw only the non-text chemistry graphics in pure black on white. Convert every solid filled icon, node, arrowhead, "
         "or shape into a black outline with a white hollow interior, while preserving bond connectivity and geometry. "
         "Every original reaction mark, chemical symbol, bond, arrow, stereochemical mark, panel marker, and label is mandatory; "
-        "never omit a mark even when it is small or visually ambiguous."
+        "never omit a mark even when it is small or visually ambiguous.",
+        palette,
     )
 
 
@@ -2525,6 +2580,11 @@ def run(args: argparse.Namespace) -> int:
     force_standard_ai_edit = bool(getattr(args, "force_standard_ai_edit", False))
     review_root = Path(args.review_root).resolve()
     args.edit_profile = getattr(args, "edit_profile", "standard")
+    # Programmatic callers may build a Namespace by hand; an unknown value falls
+    # back to the deployed default rather than silently keeping colour.
+    args.palette = str(getattr(args, "palette", "") or DEFAULT_FIGURE_PALETTE)
+    if args.palette not in FIGURE_PALETTES:
+        args.palette = DEFAULT_FIGURE_PALETTE
     requested_figure_type = normalize_figure_type(getattr(args, "figure_type", FIGURE_TYPE_AUTO))
     load_dotenv(review_root)
     if not args.base_url:
@@ -2729,6 +2789,7 @@ def run(args: argparse.Namespace) -> int:
                 figure,
                 source_ocr["text"] if effective_render_mode == "ocr-hollow-ai" and source_ocr["status"] == "ok" else "",
                 figure_type,
+                args.palette,
             )
         aspect_framing: dict[str, Any] = {}
         api_edit_input = edit_input
@@ -2938,7 +2999,11 @@ def run(args: argparse.Namespace) -> int:
                     if not attempt_failures:
                         break
                     continue
-                if figure_type == FIGURE_TYPE_COLORED and effective_render_mode == "ai-edit":
+                if (
+                    figure_type == FIGURE_TYPE_COLORED
+                    and effective_render_mode == "ai-edit"
+                    and args.palette != "monochrome"
+                ):
                     cleanup = colored_fill_cleanup_check(copied_source, out_path)
                     colored_cleanup_attempts.append(
                         {
@@ -3029,6 +3094,7 @@ def run(args: argparse.Namespace) -> int:
             if (
                 not retained
                 and figure_type == FIGURE_TYPE_COLORED
+                and args.palette != "monochrome"
                 and colored_cleanup_attempts
                 and out_path.is_file()
             ):
@@ -3047,6 +3113,21 @@ def run(args: argparse.Namespace) -> int:
             if not retained:
                 redraw_row["status"] = "failed"
                 redraw_row["notes"] = f"{type(exc).__name__}: {exc}"
+        if args.palette == "monochrome" and redraw_row.get("status") == "redrawn":
+            # Every step that pastes source pixels back (text and small-mark
+            # restoration) has run by now, so this is the last word on colour.
+            target = Path(str(redraw_row.get("redrawn_image") or out_path))
+            if target.is_file():
+                redraw_row["palette"] = "monochrome"
+                redraw_row["monochrome_conversion"] = to_monochrome(target)
+                monochrome_check = monochrome_palette_check(target)
+                redraw_row["monochrome_check"] = monochrome_check
+                if monochrome_check["status"] != "pass":
+                    redraw_row["output_disposition"] = "saved_with_integrity_warning"
+                    redraw_row["notes"] = (
+                        "Saved with a greyscale warning: "
+                        + "; ".join(monochrome_check["failures"])
+                    )
         redraw_rows.append(redraw_row)
     current_redrawn_count = sum(1 for row in redraw_rows if row.get("status") == "redrawn")
     if args.paper_id or figure_id:
@@ -3107,6 +3188,15 @@ def parse_args() -> argparse.Namespace:
         choices=["urllib", "curl"],
         default="urllib",
         help="Multipart transport for image edits (default: urllib).",
+    )
+    parser.add_argument(
+        "--palette",
+        choices=list(FIGURE_PALETTES),
+        default=os.environ.get("REVIEW_WRITER_FIGURE_PALETTE", "").strip() or DEFAULT_FIGURE_PALETTE,
+        help=(
+            "monochrome renders every redrawn figure in greyscale (default); "
+            "source keeps the redraw's semantic colours, as before."
+        ),
     )
     parser.add_argument(
         "--render-mode",

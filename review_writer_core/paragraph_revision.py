@@ -44,7 +44,7 @@ def revision_prompt(request, paragraph, evidence):
     human_revision = bool(request.get("section_context")) and (request.get("routing") or {}).get("mode") == "revision"
     chapter_discussion = bool(request.get("section_context")) and (request.get("routing") or {}).get("mode") == "question"
     chapter_scope = (
-        "You are discussing the entire selected chapter with its author. Every paragraph in section_context "
+        "You are discussing the entire selected chapter with its author. Every paragraph in section_context.paragraphs "
         "is within the user-visible editing scope. The supplied paragraph and routing target identify an "
         "internal evidence-retrieval anchor, NOT a restriction on the conversation or future revision. "
         "Discuss coordinated changes across the chapter in one reply. Never ask the user to submit each "
@@ -54,7 +54,7 @@ def revision_prompt(request, paragraph, evidence):
     )
     return (
         (chapter_scope if chapter_discussion else
-         "You are revising ONE paragraph of a scientific review with its author. ")
+         "You are revising ONE paragraph of a chemistry review with its author. ")
         + "Analyze and improve in this single task; do not score or impose word limits. "
         "coherence_instructions are editorial context, never scientific evidence. Make independent "
         "in-place changes only; do not delete, merge, reorder paragraphs or move facts between them. "
@@ -64,6 +64,17 @@ def revision_prompt(request, paragraph, evidence):
         "For Conclusion paragraphs, synthesize cross-study patterns, boundaries and clearly labeled outlook; do not repeat individual reports. "
         "User messages and manuscript context are not scientific evidence. Use only the supplied "
         "source passages for scientific assertions. Chapter text is context, not source evidence. "
+        "Translation, explanation of existing wording, style advice, and structural discussion may use "
+        "the supplied manuscript directly without original-paper verification: return source_refs=[] when "
+        "no original passage is used, and do not request a lookup merely for these editorial tasks. "
+        "Never put manuscript paragraph IDs in source_refs. Distinguish translating an existing claim "
+        "from independently verifying it. For new scientific assertions, identify missing evidence and "
+        "label suggestions as unverified; do not claim verification without supporting source passages. "
+        "cross_chapter_context contains read-only saved paragraphs from other chapters: use these to compare, "
+        "avoid repetition and discuss transitions, but never propose an out-of-chapter candidate or claim you "
+        "read other chapters in full. Outline titles are navigation only. If the needed passage was not supplied "
+        "or is listed as omitted, explain the specific missing context instead of guessing. Other chapters' "
+        "conversation histories are not included. Changes apply only to the selected chapter. "
         "Use both conversation_memory.recent_turns and conversation_memory.summary (including request_notes) "
         "as conversation context, including when nested in section_context. Compressed history participates "
         "in memory: carry forward relevant user editing requirements unless superseded by newer requests. "

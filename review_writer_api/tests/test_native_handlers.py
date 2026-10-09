@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -515,8 +516,14 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
 
             render_mode_index = runner.command.index("--render-mode")
             model_index = runner.command.index("--model")
+            palette_index = runner.command.index("--palette")
             self.assertEqual("ai-edit", runner.command[render_mode_index + 1])
             self.assertEqual("configured-image-model", runner.command[model_index + 1])
+            # Redrawn figures are greyscale unless the deployment switches back.
+            self.assertEqual(
+                os.environ.get("REVIEW_WRITER_FIGURE_PALETTE", "").strip() or "monochrome",
+                runner.command[palette_index + 1],
+            )
             self.assertIn("--force-standard-ai-edit", runner.command)
             self.assertNotIn("source-faithful-bw", runner.command)
             self.assertEqual("ai-edit", result["render_mode"])
@@ -839,8 +846,11 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
             handler.root = root
             handler._staging = lambda *_: root
             handler._text_gateway_environment = lambda _: ({}, {})
-            handler.runner = SimpleNamespace(run=lambda *a, **k: (root / "matrix-enrichment-output.json").write_text(
-                '{"papers": []}', encoding="utf-8"))
+            commands = []
+            def run(command, **kwargs):
+                commands.append(command)
+                (root / "matrix-enrichment-output.json").write_text('{"papers": []}', encoding="utf-8")
+            handler.runner = SimpleNamespace(run=run)
             context = SimpleNamespace(user_id=str(uuid.uuid4()), project_id="project", job_id=str(uuid.uuid4()),
                                       checkpoint=lambda: None, cancellation_requested=lambda: False)
             for global_slots, user_slots, requested, expected in [(4, 3, 8, 3), (4, 1, 3, 1), (2, 3, 3, 2), (4, 3, 1, 1)]:
@@ -853,6 +863,13 @@ class NativeWorkflowHandlerTests(unittest.TestCase):
                     saved = json.loads((root / "matrix-enrichment-input.json").read_text(encoding="utf-8"))
                     self.assertEqual({"paper_concurrency": expected, "max_model_calls": 5, "max_supplement_rounds": 1},
                                      saved["fact_agent_limits"])
+                    self.assertEqual(str(expected), commands[-1][commands[-1].index("--max-new-papers") + 1])
+
+            handler.model_gateway = SimpleNamespace(settings=object(), session_factory=object())
+            with patch("review_writer_api.job_handlers.planning.text_parallelism", return_value=2) as live_limits:
+                handler.matrix_enrich(context, {"papers": []})
+            live_limits.assert_called_once_with(handler.model_gateway.settings, handler.model_gateway.session_factory)
+            self.assertEqual("2", commands[-1][commands[-1].index("--max-new-papers") + 1])
 
     def test_model_delegation_is_scoped_to_standalone_matrix_not_embedded_blueprint(self):
         with tempfile.TemporaryDirectory() as temporary:

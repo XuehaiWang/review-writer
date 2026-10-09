@@ -22,6 +22,7 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from review_writer_core.atomic_io import atomic_write_json as write_json  # noqa: E402
 from review_writer_core.review_structure import (  # noqa: E402
     assign_primary_paper_sections,
     infer_section_role,
@@ -48,23 +49,8 @@ def read_json(path: Path) -> Any:
         return json.load(f)
 
 
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
-
-
-
-
-
-
-
-
 
 
 def load_matrix(path: Path) -> tuple[str, list[dict[str, Any]], list[str]]:
@@ -89,32 +75,6 @@ def load_notes(path: Path) -> dict[str, dict[str, Any]]:
     if not isinstance(rows, list):
         return {}
     return {str(row.get("paper_id")): row for row in rows if isinstance(row, dict) and row.get("paper_id")}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def write_plan(path: Path, blueprint: dict[str, Any]) -> None:

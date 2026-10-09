@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = (
@@ -19,6 +20,107 @@ SPEC.loader.exec_module(PIPELINE)
 
 
 class MatrixFactEnrichmentTests(unittest.TestCase):
+    def test_optional_opening_abstract_uses_same_reading_and_never_promotes_intro(self):
+        quote = 'We investigate a new method and demonstrate improved selectivity under these experimental conditions.'
+        paper = {'paper_id': 'P1', 'reading_strategy': PIPELINE.REVIEW_READING_STRATEGY,
+                 'abstract': 'abstract unavailable or unreliable',
+                 'evidence_candidates': [{'evidence_key': 'opening', 'opening_candidate': True,
+                    'content_type': 'text', 'content': quote, 'section_path': [], 'question_ids': []}]}
+        prompt = PIPELINE.review_reading_prompt('Synthesis', paper)
+        self.assertIn('NOT automatically its abstract', prompt)
+        self.assertIn('abstract_recovery', prompt)
+        self.assertEqual(prompt.count(quote), 1)
+        raw = {'decision': 'abstract', 'spans': [{'evidence_key': 'opening', 'quote': quote}]}
+        generated = {'facts': [], 'paper_analysis': {'research_question': 'What works?',
+            'contribution': 'A bounded method.', 'evidence_keys': ['opening']}, 'abstract_recovery': raw}
+        result = PIPELINE.normalize_result(PIPELINE.extraction_validation_paper(paper), generated)
+        self.assertEqual(quote, result['abstract_recovery']['value'])
+        self.assertEqual([], result['facts'])  # Not a newly verified scientific fact.
+        paper['evidence_candidates'][0]['section_path'] = ['Introduction']
+        result = PIPELINE.normalize_result(PIPELINE.extraction_validation_paper(paper), generated)
+        self.assertNotIn('abstract_recovery', result)
+        self.assertTrue(result['paper_analysis'])  # Normal reading is retained.
+        paper['abstract'] = 'Known abstract'
+        self.assertNotIn('abstract_recovery', PIPELINE.review_reading_prompt('Synthesis', paper))
+
+    def test_topic_role_is_priority_not_an_extraction_whitelist(self):
+        paper = {
+            "paper_id": "P-topic",
+            "required_fact_roles": ["object_input"],
+            "evidence_candidates": [{
+                "evidence_key": "sha256:results", "chunk_id": "results-1",
+                "content_type": "text", "section_path": ["Results"],
+                "source_lineage_hash": "lineage",
+                "question_ids": ["object_input"],
+                "content": "We reacted the starting material under mild conditions and isolated the product in 91% yield.",
+            }],
+        }
+        self.assertEqual(("object_input",), PIPELINE.requested_fact_roles(paper))
+        self.assertIn("quantitative_results", PIPELINE.available_fact_roles(paper))
+        self.assertIn("method_conditions", PIPELINE.available_fact_roles(paper))
+        prompt = PIPELINE.prompt_for_paper("Review the reported synthesis", paper)
+        self.assertIn("Topic-priority fields: [\"object_input\"]", prompt)
+        self.assertIn("Use any available field supported by a supplied passage", prompt)
+        result = PIPELINE.normalize_result(PIPELINE.extraction_validation_paper(paper), {
+            "facts": [{
+                "field_id": "quantitative_results", "value": "The product was isolated in 91% yield.",
+                "support_excerpt": "isolated the product in 91% yield",
+                "evidence_key": "sha256:results", "confidence": 0.94,
+                "study_ownership": "own_results",
+            }],
+        })
+        self.assertEqual("quantitative_results", result["facts"][0]["field_id"])
+
+    def test_other_role_window_is_not_hidden_by_topic_priority(self):
+        paper = {"required_fact_roles": ["object_input"], "evidence_candidates": [
+            {"evidence_key": "input", "question_ids": ["object_input"],
+             "content_type": "text", "content": "We used prepared samples."},
+            {"evidence_key": "result", "question_ids": ["validation_evidence"],
+             "content_type": "text", "content": "We verified the finding with an independent cohort."},
+        ]}
+        visible = PIPELINE.extraction_context(paper)
+        self.assertEqual(["input", "result"], [row["evidence_key"] for row in visible])
+
+    def test_old_single_role_cache_cannot_skip_broader_extraction(self):
+        cached_fact = self._agent_result()["facts"][0]
+        paper = {**self.paper, "required_fact_roles": ["quantitative_results"],
+                 "reused_fact_cache": {"prompt_version": "fact-extraction/7",
+                                       "facts": [cached_fact]}}
+        with patch.object(PIPELINE, "fact_is_usable", return_value=True), \
+                patch.object(PIPELINE, "fact_needs_verification", return_value=False):
+            self.assertFalse(PIPELINE.cache_covers_current_fields(paper))
+            paper["reused_fact_cache"]["prompt_version"] = PIPELINE.FACT_PROMPT_VERSION
+            self.assertTrue(PIPELINE.cache_covers_current_fields(paper))
+
+    def test_primary_body_candidate_reaches_fact_prompt_before_intro(self):
+        self.paper["evidence_candidates"] = [
+            {
+                "evidence_key": "sha256:body", "content_type": "text",
+                "page_start": 2, "content": "The target products were obtained from the reported reaction.",
+                "question_ids": [],
+            },
+            {
+                "evidence_key": "sha256:intro", "content_type": "text",
+                "page_start": 1, "content": "Previous authors reported a related reaction.",
+                "question_ids": ["quantitative_results"],
+            },
+        ]
+        visible = PIPELINE.extraction_context(self.paper)
+        self.assertEqual("sha256:body", visible[0]["evidence_key"])
+
+    def test_unshown_tail_is_not_validated_as_read_evidence(self):
+        source = self.paper["evidence_candidates"][0]
+        quote = source["content"]
+        source["content"] = "Background context. " * 200 + quote
+        generated = {"facts": [{"field_id": "quantitative_results", "value": "91% yield",
+                     "evidence_key": source["evidence_key"], "support_excerpt": quote}]}
+        visible = PIPELINE.extraction_validation_paper(self.paper)
+        self.assertNotIn(quote, visible["evidence_candidates"][0]["content"])
+        result = PIPELINE.normalize_result(visible, generated)
+        self.assertEqual([], result["facts"])
+        self.assertTrue(result["normalization_rejections"])
+        self.assertIn(quote, source["content"])
+
     def test_source_addressable_contribution_survives_without_usable_facts(self):
         result = PIPELINE.normalize_result(self.paper, {"facts": [], "paper_analysis": {
             "research_question": "Which selectivity can be achieved?", "contribution": "A bounded protocol",
@@ -307,7 +409,8 @@ class MatrixFactEnrichmentTests(unittest.TestCase):
             raise RuntimeError("temporary outage")
         PIPELINE.run_fact_agent(self.paper, result, model_call=unavailable, retrieve=lambda _: [],
                                 state=state, report=lambda _: None)
-        self.assertFalse(PIPELINE.fact_is_usable(result["facts"][0]))
+        self.assertTrue(PIPELINE.fact_is_usable(result["facts"][0]))
+        self.assertFalse(PIPELINE.fact_is_usable(result["facts"][0], purpose="detail"))
         self.assertIn("error", state)
         PIPELINE.run_fact_agent(self.paper, result, model_call=lambda *a, **k: {"verdicts": [
             {"fact_id": result["facts"][0]["fact_id"], "status": "supported", "reason": "Matched both reported metrics."}
@@ -390,7 +493,7 @@ class MatrixFactEnrichmentTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual("partial", result["status"])
+        self.assertEqual("complete", result["status"])
         self.assertEqual(1, len(result["facts"]))
         fact = result["facts"][0]
         self.assertEqual(4, fact["evidence_refs"][0]["page_start"])

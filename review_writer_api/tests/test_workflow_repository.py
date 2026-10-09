@@ -11,18 +11,16 @@ import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, func, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import func, select
 
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings, database_url_from_env
 from review_writer_api.database import Base, Project, User, create_session_factory, database_session
 from review_writer_api.security import Principal, Role
+from review_writer_api.tests._test_support import session_factory
 from review_writer_api.workflow_models import (
     WorkflowArtifact,
     WorkflowJob,
-    WorkflowSystemState,
 )
 
 
@@ -37,22 +35,6 @@ def repository_api():
         raise AssertionError("The isolated PostgreSQL workflow repository is missing.") from exc
     return errors, repository
 
-
-def session_factory():
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(engine, "connect")
-    def enable_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False), engine
 
 
 class WorkflowRepositoryTests(unittest.TestCase):

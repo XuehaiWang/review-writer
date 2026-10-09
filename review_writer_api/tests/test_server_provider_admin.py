@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from review_writer_api.auth import AuthService
 from review_writer_api.config import ApiSettings
@@ -30,10 +29,13 @@ TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("="
 class ServerProviderAdminTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        # A file-backed SQLite database lets the model gateway's thread pool
+        # open independent connections instead of racing on one shared
+        # StaticPool connection.
+        database_path = Path(self.temporary.name) / "providers.sqlite3"
         self.engine = create_engine(
-            "sqlite+pysqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
+            f"sqlite+pysqlite:///{database_path.as_posix()}",
+            connect_args={"check_same_thread": False, "timeout": 30},
         )
         Base.metadata.create_all(self.engine)
         self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False)

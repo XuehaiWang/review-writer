@@ -10,7 +10,7 @@ from typing import Any
 from .chemical_typography import normalize_chemical_typography
 
 
-TEMPLATE_VERSION = "modern-survey/10"
+TEMPLATE_VERSION = "modern-survey/11"
 SUPPORTED_PROFILES = frozenset({"en", "zh-CN"})
 
 
@@ -202,14 +202,18 @@ def _table(block: dict[str, Any]) -> str:
     caption = TABLE_LABEL.sub("", str(block.get("caption") or "").strip()).strip()
     estimated_lines = _estimated_table_lines(header, rows, width, caption)
     if len(rows) <= 20 and estimated_lines <= 58:
+        compact = (width <= 3 and len(rows) <= 6
+                   and max(sum(_display_units(cell) for cell in values) for values in [header, *rows]) <= 100)
+        environment = "table" if compact else "table*"
+        table_width = r"\columnwidth" if compact else r"\textwidth"
         lines = [
-            r"\begin{table*}[t]",
+            rf"\begin{{{environment}}}[{'!htbp' if compact else '!tb'}]",
             r"\centering",
             r"\setlength{\tabcolsep}{3.2pt}",
             r"\renewcommand{\arraystretch}{1.08}",
-            r"\fontsize{7.2}{8.4}\selectfont",
+            r"\fontsize{8}{9.5}\selectfont" if compact else r"\fontsize{7.2}{8.4}\selectfont",
             *( [rf"\caption{{{latex_escape(caption)}}}"] if caption else [] ),
-            rf"\begin{{tabularx}}{{\textwidth}}{{{columns}}}",
+            rf"\begin{{tabularx}}{{{table_width}}}{{{columns}}}",
             r"\toprule",
             r"\rowcolor{AcademicHeader}",
             row(header),
@@ -219,30 +223,56 @@ def _table(block: dict[str, Any]) -> str:
             if index % 2 == 0:
                 lines.append(r"\rowcolor{AcademicRow}")
             lines.append(row(values))
-        lines.extend([r"\bottomrule", r"\end{tabularx}", r"\end{table*}"])
+        lines.extend([r"\bottomrule", r"\end{tabularx}", rf"\end{{{environment}}}"])
         return "\n".join(lines)
-    long_columns = "@{}" + " ".join(
-        [rf">{{\RaggedRight\arraybackslash}}p{{{0.94 / width:.3f}\textwidth}}"] * width
-    ) + "@{}"
-    lines = [
-        r"\clearpage\onecolumn",
-        r"\begingroup\fontsize{7.2}{8.4}\selectfont",
-        rf"\begin{{longtable}}{{{long_columns}}}",
-        *( [rf"\caption{{{latex_escape(caption)}}} \\"] if caption else [] ),
-        r"\toprule",
-        row(header),
-        r"\midrule",
-        r"\endfirsthead",
-        r"\toprule",
-        row(header),
-        r"\midrule",
-        r"\endhead",
-    ]
-    lines.extend(row(values) for values in _paginate_table_rows(rows, width))
-    lines.extend(
-        [r"\bottomrule", r"\end{longtable}", r"\endgroup", r"\clearpage\twocolumn"]
-    )
-    return "\n".join(lines)
+    # A long table is emitted as several page-sized wide floats. Switching to a
+    # single-column longtable (\clearpage\onecolumn ... \clearpage\twocolumn)
+    # forces page breaks and leaves nearly blank pages in the two-column layout.
+    characters_per_line = max(12, 144 // max(1, width))
+
+    def wrapped_lines(values: list[Any]) -> int:
+        padded = [*values, *([""] * (width - len(values)))]
+        return max(1, *(ceil(_display_units(value) / characters_per_line) for value in padded[:width]))
+
+    # TeX cannot break inside one table row, so split an oversized row first;
+    # no text is dropped, it continues in appended rows.
+    rows = _paginate_table_rows(rows, width)
+    groups: list[list[list[Any]]] = []
+    current: list[list[Any]] = []
+    used = wrapped_lines(header) + (ceil(_display_units(caption) / 144) if caption else 0)
+    for values in rows:
+        height = wrapped_lines(values)
+        if current and used + height > 46:
+            groups.append(current)
+            current, used = [], wrapped_lines(header)
+        current.append(values)
+        used += height
+    if current:
+        groups.append(current)
+    rendered: list[str] = []
+    total = len(groups)
+    for index, chunk in enumerate(groups, start=1):
+        part_caption = caption if total == 1 else f"{caption} ({index}/{total})"
+        lines = [
+            r"\begin{table*}[!tb]",
+            r"\centering",
+            r"\setlength{\tabcolsep}{3.2pt}",
+            r"\renewcommand{\arraystretch}{1.08}",
+            r"\fontsize{7.2}{8.4}\selectfont",
+            *( [rf"\caption{{{latex_escape(part_caption)}}}"] if part_caption else [] ),
+            rf"\begin{{tabularx}}{{\textwidth}}{{{columns}}}",
+            r"\toprule",
+            r"\rowcolor{AcademicHeader}",
+            row(header),
+            r"\midrule",
+        ]
+        for row_index, values in enumerate(chunk):
+            if row_index % 2 == 0:
+                lines.append(r"\rowcolor{AcademicRow}")
+            lines.append(row(values))
+        lines.extend([r"\bottomrule", r"\end{tabularx}", r"\end{table*}"])
+        rendered.append("\n".join(lines))
+    return "\n".join(rendered)
 
 
 def _front_matter(state: dict[str, Any], profile: str) -> str:
@@ -252,12 +282,12 @@ def _front_matter(state: dict[str, Any], profile: str) -> str:
     authors = [str(item).strip() for item in front.get("authors") or [] if str(item).strip()]
     affiliations = [str(item).strip() for item in front.get("affiliations") or [] if str(item).strip()]
     released_date = str(front.get("date") or "").strip()
-    review_label = "学术综述" if profile == "zh-CN" else "ACADEMIC SURVEY"
+    review_label = "化学综述" if profile == "zh-CN" else "CHEMISTRY SURVEY"
     abstract_label = "摘要" if profile == "zh-CN" else "Abstract"
     keyword_label = "关键词" if profile == "zh-CN" else "Keywords"
     lines = [
         r"\begin{tcolorbox}[journalpanel]",
-        rf"{{\sffamily\bfseries\fontsize{{21}}{{24}}\selectfont\color{{AcademicInk}} {latex_escape(state.get('title') or 'Scientific Review')}\par}}",
+        rf"{{\sffamily\bfseries\fontsize{{21}}{{24}}\selectfont\color{{AcademicInk}} {latex_escape(state.get('title') or 'Chemistry Review')}\par}}",
         r"\vspace{0.55em}",
         rf"{{\sffamily\bfseries\fontsize{{8.2}}{{9.4}}\selectfont\color{{AcademicBlue}} {latex_escape(review_label)}\par}}",
     ]
@@ -297,6 +327,7 @@ def _front_matter(state: dict[str, Any], profile: str) -> str:
 
 def render_body(state: dict[str, Any]) -> str:
     lines: list[str] = []
+    pending_table = False
     consumed = {
         int(index)
         for index in (state.get("front_matter") or {}).get("consumed_block_indexes") or []
@@ -307,6 +338,12 @@ def render_body(state: dict[str, Any]) -> str:
         kind = str(block.get("kind") or "")
         if kind == "heading":
             heading_text = str(block.get("text") or "")
+            if pending_table and int(block.get("level") or 2) <= 2:
+                # Do not force a float barrier here: in the two-column layout it
+                # flushed pending wide tables to a fresh page and left a nearly
+                # blank page behind. Floats are drained once, before the
+                # bibliography, which is enough to keep them near their sections.
+                pending_table = False
             if re.sub(r"^\s*\d+(?:\.\d+)*[.)、：:\-]?\s*", "", heading_text).strip().casefold() in REFERENCE_TITLES:
                 # Drain pending figures before the bibliography without the
                 # unconditional page break imposed by \clearpage.
@@ -321,6 +358,7 @@ def render_body(state: dict[str, Any]) -> str:
             lines.extend([rf"\end{{{environment}}}", ""])
         elif kind == "table":
             lines.extend([_table(block), ""])
+            pending_table = True
         elif kind == "image":
             resolved = str(block.get("resolved_path") or "")
             if not resolved:
@@ -372,9 +410,14 @@ def language_preamble(profile: str) -> str:
 
 
 def render_tex(state: dict[str, Any], *, profile: str, template: str) -> str:
+    front = _front_matter(state, profile)
+    body = render_body(state)
+    # English manuscripts may have Chinese author names. Font coverage is
+    # independent of the manuscript's labels/language, which stay unchanged.
+    font_profile = "zh-CN" if profile == "en" and re.search(r"[\u3400-\u9fff]", front + body) else profile
     return (
         str(template)
-        .replace("%__LANGUAGE_PREAMBLE__%", language_preamble(profile))
-        .replace("%__FRONT_MATTER__%", _front_matter(state, profile))
-        .replace("%__DOCUMENT_BODY__%", render_body(state))
+        .replace("%__LANGUAGE_PREAMBLE__%", language_preamble(font_profile))
+        .replace("%__FRONT_MATTER__%", front)
+        .replace("%__DOCUMENT_BODY__%", body)
     )

@@ -60,6 +60,7 @@ def provider_error_message(error: dict) -> str:
         "model_unavailable": "当前配置的模型不存在或未向此服务账号开放，请管理员调整模型或服务分组；重复重试不会解决。",
         "quota_exhausted": "模型提供方额度已耗尽或不足。请恢复额度或重新分配可用会话后重试未完成部分；继续等待不会恢复已失败的请求。",
         "context_limit": "模型请求超过提供方上下文或请求大小限制，需要缩小当前请求后重试。",
+        "output_limit": "模型回答达到输出上限，当前结果不完整；已完成的章节会保留，请重试未完成部分。",
         "authentication": "模型服务授权不可用，请检查服务配置后重试。",
         "rate_limited": "模型提供方当前请求过多，请稍后重试未完成部分。",
     }.get(error.get("category"), "文本模型服务暂时不可用，请稍后重试。")

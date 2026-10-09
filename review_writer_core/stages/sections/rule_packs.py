@@ -136,3 +136,23 @@ def load_rule_pack_text(
             text = text[:allowance - len(truncation)].rstrip() + truncation
         chunks.append(header + text)
     return "\n\n".join(chunks)
+
+
+def load_drafting_rule_pack_text(review_root: Path, blueprint: dict[str, Any]) -> str:
+    """Use runtime science safeguards, not the historical rule-learning corpus.
+
+    Keep the existing Blueprint identity/validation unchanged. The resulting
+    text participates in section and request fingerprints at the caller.
+    Third-party packs without a runtime projection retain their declared rules.
+    """
+    selected = validate_blueprint_rule_pack(review_root, blueprint)
+    root = (_skill_root(review_root) / selected["path"]).resolve()
+    path = (root / "drafting-policy.md").resolve()
+    if not path.is_relative_to(root):
+        raise RulePackConfigurationError("Drafting policy escapes its rule pack.")
+    if not path.is_file():
+        return load_rule_pack_text(review_root, blueprint)
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return load_rule_pack_text(review_root, blueprint)
+    return f"<!-- drafting rule source: {selected['name']}/drafting-policy.md -->\n{text}"

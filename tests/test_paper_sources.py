@@ -6,6 +6,17 @@ from unittest.mock import patch
 from review_writer_core.paper_sources import PaperSearchRequest, SourceSearchResult, search_paper_sources
 from review_writer_core.paper_sources.crossref import CrossrefConnector
 from review_writer_core.paper_sources.deduplicate import deduplicate_candidates
+from review_writer_core.stages.discovery.records import (
+    dedupe, unique_keyword_dicts, format_crossref_authors, result_dedupe_key,
+)
+
+
+def test_shared_discovery_helpers_keep_legacy_result_identity():
+    assert dedupe([" A  B ", "a b", "C"]) == ["A B", "C"]
+    assert unique_keyword_dicts([{"keyword": "Allene"}, {"keyword": "allene"}]) == [{"keyword": "Allene"}]
+    assert format_crossref_authors([{"given": "Ada", "family": "Lovelace"}]) == ["Ada Lovelace"]
+    assert result_dedupe_key({"doi": " 10.1/ABC ", "title": "Other"}) == "doi:10.1/abc"
+    assert result_dedupe_key({"title": "  A   Review "}) == "title:a review"
 
 
 def candidate(

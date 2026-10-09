@@ -4,12 +4,11 @@ import importlib
 import unittest
 import uuid
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from review_writer_api.database import Base, Project, User
+from review_writer_api.tests._test_support import session_factory
 
 
 def workflow_api():
@@ -20,22 +19,6 @@ def workflow_api():
         raise AssertionError("PostgreSQL workflow models and contracts are missing.") from exc
     return contracts, models
 
-
-def session_factory():
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(engine, "connect")
-    def enable_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False), engine
 
 
 class WorkflowContractTests(unittest.TestCase):

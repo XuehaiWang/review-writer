@@ -33,6 +33,50 @@ from review_writer_core.retrieval import (
 
 
 _QUERY_TOKEN = re.compile(r"[\u3400-\u9fff]|[\w]+(?:[-'][\w]+)*", re.UNICODE)
+_NON_RESEARCH_HEADINGS = re.compile(
+    r"\b(?:references|bibliography|acknowledg(?:e)?ments?|author information|"
+    r"associated content|supporting information|conflicts? of interest)\b", re.IGNORECASE
+)
+
+
+def _contribution_chunk_candidates(chunks: list[LibraryDocumentChunk], contribution: str, limit: int) -> list[LibraryDocumentChunk]:
+    """Sample the paper's own body, not the keyword-rich introduction or references.
+
+    This is a recall aid, not a claim that a sampled passage reports original work.
+    The source writer still checks study ownership against the passage itself.
+    """
+    readable = [chunk for chunk in chunks
+                if chunk.content_type in {"text", "merged_text", "markdown"}
+                and len(str(chunk.content or "").strip()) >= 80
+                and not _NON_RESEARCH_HEADINGS.search(" ".join(str(part) for part in chunk.section_path_json or []))]
+    if not readable:
+        return []
+    pages = sorted({chunk.page_start for chunk in readable if chunk.page_start is not None})
+    interior = ([chunk for chunk in readable if chunk.page_start != pages[0]]
+                if len(pages) >= 2 else [])
+    candidates = interior or readable
+    terms = {token.casefold() for token in _QUERY_TOKEN.findall(contribution)
+             if len(token) >= 4 and not token.isdigit()}
+    def score(chunk: LibraryDocumentChunk) -> tuple[int, int]:
+        body = str(chunk.normalized_content or chunk.content or "").casefold()
+        matched = sum(term in body for term in terms)
+        return matched, min(len(body), 1500)
+    ranked = sorted(candidates, key=lambda chunk: (-score(chunk)[0], -score(chunk)[1], chunk.ordinal))
+    selected: list[LibraryDocumentChunk] = []
+    used_pages: set[int | None] = set()
+    for chunk in ranked:
+        if chunk.page_start in used_pages:
+            continue
+        selected.append(chunk)
+        used_pages.add(chunk.page_start)
+        if len(selected) >= limit:
+            return selected
+    for chunk in ranked:
+        if chunk not in selected:
+            selected.append(chunk)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def postgres_term_group_constraint(vector, groups: list[list[str]]):
@@ -85,6 +129,26 @@ class EvidenceHit:
     source_lineage_hash: str
     previous_chunk_id: str = ""
     next_chunk_id: str = ""
+
+
+def _indexed_chunk_hit(chunk: LibraryDocumentChunk, lineage_hash: str, reason: str) -> EvidenceHit:
+    return EvidenceHit(
+        paper_id=chunk.paper_id,
+        chunk_id=chunk.chunk_id,
+        content=chunk.content,
+        page_start=chunk.page_start,
+        page_end=chunk.page_end,
+        section_path=tuple(str(item) for item in chunk.section_path_json or []),
+        content_type=chunk.content_type,
+        asset_refs=tuple(str(item) for item in chunk.asset_refs_json or []),
+        score=0.0,
+        match_reason=reason,
+        is_neighbor=False,
+        index_id=str(chunk.index_id),
+        source_lineage_hash=str(lineage_hash),
+        previous_chunk_id=chunk.previous_chunk_id,
+        next_chunk_id=chunk.next_chunk_id,
+    )
 
 
 class LibraryIndexService:
@@ -1893,6 +1957,83 @@ class LibraryIndexService:
                         "section_path": list(hit.section_path), "source_lineage_hash": hit.source_lineage_hash})
         return resolved
 
+    def sample_document_context(self, principal: Principal, paper_id: str, *,
+                                expected_lineage: str, limit: int = 6, opening_only: bool = False) -> list[dict[str, Any]]:
+        """Sample registered text across a document or from its opening.
+
+        Both modes share ownership, current-lineage and archive checks. Opening
+        position is a reading hint, never an abstract/own-contribution verdict.
+        """
+        principal.require(Permission.PROJECT_READ)
+        if not expected_lineage:
+            return []
+        limit = max(1, min(int(limit), 6))
+        with database_session(self.session_factory) as session:
+            ranked = (select(LibraryDocumentChunk.chunk_id.label("chunk_id"),
+                             func.row_number().over(order_by=LibraryDocumentChunk.ordinal).label("position"))
+                .join(LibraryDocumentIndex, LibraryDocumentIndex.id == LibraryDocumentChunk.index_id)
+                .join(LibraryPaper, (LibraryPaper.user_id == LibraryDocumentChunk.user_id)
+                      & (LibraryPaper.paper_id == LibraryDocumentChunk.paper_id))
+                .where(LibraryDocumentChunk.user_id == uuid.UUID(principal.user_id),
+                       LibraryDocumentChunk.paper_id == paper_id,
+                       LibraryDocumentIndex.is_current.is_(True), LibraryDocumentIndex.status == "ready",
+                       LibraryDocumentIndex.source_lineage_hash == expected_lineage,
+                       LibraryDocumentChunk.is_reference.is_(False),
+                       func.length(func.trim(LibraryDocumentChunk.content)) > 0,
+                       LibraryPaper.status == "active", LibraryPaper.deleted_at.is_(None)).subquery())
+            count = session.scalar(select(func.count()).select_from(ranked)) or 0
+            size = min(limit, count)
+            positions = (list(range(1, size + 1)) if opening_only else
+                         sorted({1 + round(i * (count - 1) / max(1, size - 1)) for i in range(size)}))
+            ids = list(session.scalars(select(ranked.c.chunk_id)
+                       .where(ranked.c.position.in_(positions)).order_by(ranked.c.position)))
+        resolved = self.resolve_source_chunks(principal, paper_id, ids, expected_lineage=expected_lineage)
+        by_id = {row["chunk_id"]: row for row in resolved}
+        return [by_id[cid] for cid in ids if cid in by_id]
+
+    def primary_contribution_hits(
+        self,
+        principal: Principal,
+        *,
+        paper_id: str,
+        contribution: str = "",
+        limit: int = 2,
+    ) -> list[EvidenceHit]:
+        """Recover bounded interior passages when fact cards contain no own results.
+
+        The current index and Library ownership are checked here just as in
+        ordinary retrieval. No embedding request or new model call is needed.
+        """
+        principal.require(Permission.PROJECT_READ)
+        user_id = uuid.UUID(principal.user_id)
+        count = max(1, min(int(limit), 3))
+        with database_session(self.session_factory) as session:
+            owned = session.scalar(select(LibraryPaper.paper_id).where(
+                LibraryPaper.user_id == user_id,
+                LibraryPaper.paper_id == paper_id,
+                LibraryPaper.deleted_at.is_(None),
+                LibraryPaper.status == "active",
+            ))
+            if owned != paper_id:
+                raise WorkflowValidationError("Evidence retrieval includes a paper outside the current user's Library.")
+            rows = session.execute(
+                select(LibraryDocumentChunk, LibraryDocumentIndex.source_lineage_hash)
+                .join(LibraryDocumentIndex, LibraryDocumentIndex.id == LibraryDocumentChunk.index_id)
+                .where(
+                    LibraryDocumentChunk.user_id == user_id,
+                    LibraryDocumentChunk.paper_id == paper_id,
+                    LibraryDocumentIndex.status == "ready",
+                    LibraryDocumentIndex.is_current.is_(True),
+                    LibraryDocumentChunk.is_reference.is_(False),
+                )
+                .order_by(LibraryDocumentChunk.ordinal)
+                .limit(320)
+            ).all()
+            lineage_by_id = {chunk.id: str(lineage) for chunk, lineage in rows}
+            chosen = _contribution_chunk_candidates([chunk for chunk, _ in rows], contribution, count)
+            return [_indexed_chunk_hit(chunk, lineage_by_id[chunk.id], "primary_contribution_recovery")
+                    for chunk in chosen]
+
     def primary_coverage_hits(
         self,
         principal: Principal,
@@ -1963,30 +2104,8 @@ class LibraryIndexService:
                     .order_by(preferred_content, LibraryDocumentChunk.ordinal)
                     .limit(limit)
                 ).all()
-                output.extend(
-                    EvidenceHit(
-                        paper_id=chunk.paper_id,
-                        chunk_id=chunk.chunk_id,
-                        content=chunk.content,
-                        page_start=chunk.page_start,
-                        page_end=chunk.page_end,
-                        section_path=tuple(
-                            str(item) for item in chunk.section_path_json or []
-                        ),
-                        content_type=chunk.content_type,
-                        asset_refs=tuple(
-                            str(item) for item in chunk.asset_refs_json or []
-                        ),
-                        score=0.0,
-                        match_reason="primary_paper_coverage_fallback",
-                        is_neighbor=False,
-                        index_id=str(chunk.index_id),
-                        source_lineage_hash=str(lineage_hash),
-                        previous_chunk_id=chunk.previous_chunk_id,
-                        next_chunk_id=chunk.next_chunk_id,
-                    )
-                    for chunk, lineage_hash in rows
-                )
+                output.extend(_indexed_chunk_hit(chunk, lineage_hash, "primary_paper_coverage_fallback")
+                              for chunk, lineage_hash in rows)
         return output
 
     def recover_pdf_pages(self, principal: Principal, paper_id: str, pages: list[int], *, expected_lineage: str) -> list[EvidenceHit]:

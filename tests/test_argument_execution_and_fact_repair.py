@@ -216,7 +216,6 @@ def test_final_consumers_use_current_prose_bindings(tmp_path, monkeypatch, edite
     import json
     import sys
     from pathlib import Path
-    from types import SimpleNamespace
 
     root = Path(__file__).resolve().parents[1]
 

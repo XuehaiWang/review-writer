@@ -24,11 +24,18 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from review_writer_core.atomic_io import atomic_write_json as write_json  # noqa: E402
 from review_writer_core.metadata_tags import STRUCTURED_TAG_KEYS  # noqa: E402
 from review_writer_core.sciatlas_client import (  # noqa: E402
     SciAtlasClient,
     load_config as load_sciatlas_config,
     papers_from_response,
+)
+from review_writer_core.stages.discovery.records import (  # noqa: E402
+    dedupe,
+    unique_keyword_dicts,
+    format_crossref_authors,
+    result_dedupe_key as _result_dedupe_key,
 )
 
 
@@ -67,27 +74,8 @@ def read_json(path: Path) -> Any:
         return json.load(f)
 
 
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
 def split_keywords(raw: str) -> list[str]:
     return dedupe([x.strip() for x in re.split(r"[,;；\n]+", raw or "") if x.strip()])
-
-
-def dedupe(values: list[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        value = re.sub(r"\s+", " ", str(value).strip())
-        key = value.lower()
-        if value and key not in seen:
-            seen.add(key)
-            out.append(value)
-    return out
 
 
 def field_value(field: Any, default: Any = None) -> Any:
@@ -186,17 +174,6 @@ def load_agent_keywords(path: Path | None) -> list[dict[str, Any]]:
                 }
             )
     return unique_keyword_dicts(out)
-
-
-def unique_keyword_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in items:
-        key = item["keyword"].lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
 
 
 def build_keyword_set(topic: str, user_keywords: list[str], agent_keywords: list[dict[str, Any]]) -> dict[str, Any]:
@@ -308,15 +285,6 @@ def web_search(
     return results
 
 
-def format_crossref_authors(authors: list[dict[str, Any]]) -> list[str]:
-    out = []
-    for author in authors[:8]:
-        name = " ".join(x for x in [author.get("given"), author.get("family")] if x)
-        if name:
-            out.append(name)
-    return out
-
-
 def normalize_sciatlas_paper(item: dict[str, Any]) -> dict[str, Any]:
     # SciAtlas /v1/search nests the canonical record in `paper`; fall back to top-level keys.
     nested = item.get("paper") if isinstance(item.get("paper"), dict) else {}
@@ -410,17 +378,6 @@ def sciatlas_search(
     results = [normalize_sciatlas_paper(item) for item in papers_from_response(response)]
     results.sort(key=lambda r: (r.get("score", 0), r.get("year") or 0), reverse=True)
     return results
-
-
-def _result_dedupe_key(row: dict[str, Any]) -> str:
-    doi = (row.get("doi") or "").strip().lower()
-    if doi:
-        return "doi:" + doi
-    url = (row.get("url") or "").strip().lower()
-    if url:
-        return "url:" + url
-    title = re.sub(r"\s+", " ", str(row.get("title") or "").strip().lower())
-    return "title:" + title
 
 
 def merge_external_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

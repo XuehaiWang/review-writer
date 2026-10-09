@@ -7,6 +7,71 @@ from review_writer_api.errors import WorkflowConflict
 
 
 class ParagraphDialogueTests(fixtures.DraftsV1Tests):
+    # Dialogue generation is replaced by extra_native_workflow_overrides below.
+    offline_text_provider_key = "test-placeholder-not-a-real-key"
+
+    def test_failed_discussion_does_not_report_success_or_change_manuscript(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            before = client.get(base).json()
+            section = before["sections"][0]
+            self.fail_paragraph = section["paragraphs"][0]["paragraph_id"]
+            response = client.post(base + "/section-dialogues/" + section["section_id"], headers=self.headers("failed-discussion"), json={
+                "message": "Explain this chapter", "action": "discuss",
+                "base_hashes": {p["paragraph_key"]: p["text_sha256"] for p in section["paragraphs"]}})
+            self.assertEqual(202, response.status_code, response.text)
+            for _ in range(250):
+                job = client.get("/api/v1/jobs/" + response.json()["id"]).json()
+                if job["status"] not in {"queued", "running"}:
+                    break
+                time.sleep(.03)
+            self.assertEqual("failed", job["status"], job)
+            self.assertTrue(job["result"]["paragraph_results"])
+            self.assertEqual(before["draft_artifact_id"], client.get(base).json()["draft_artifact_id"])
+
+    def test_cross_chapter_discussion_and_revision_reuse_saved_context_without_other_writes(self):
+        from review_writer_core.workflow.artifacts import DRAFT_MANUSCRIPT
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            service = self.app.state.drafts_service
+            text, artifact = service._read_text(self.first, self.project_id, DRAFT_MANUSCRIPT)
+            text = text.replace("## References", "## Comparison\n\nA contrasting saved result.\n<!-- paragraph_id: CROSS-p1 -->\n\n## References", 1)
+            service._publish_files(self.first, self.project_id,
+                {DRAFT_MANUSCRIPT: (text.encode(), "markdown")},
+                expected_revision=service._revision(self.first, self.project_id),
+                metadata=artifact.metadata, invalidate_final=False)
+            base = f"/api/v1/projects/{self.project_id}/draft"
+            before = client.get(base).json()
+            section, other = before["sections"][:2]
+            reference = other["paragraphs"][-1]
+            self.scope_related = [{"paragraph_id": reference["paragraph_id"], "reason": "Compare the ending"}]
+            endpoint = base + "/section-dialogues/" + section["section_id"]
+            for action in ("discuss", "revise"):
+                response = client.post(endpoint, headers=self.headers("cross-" + action), json={
+                    "message": "Compare this chapter with the other ending" if action == "discuss" else "Apply our discussion",
+                    "action": action, "base_hashes": {p["paragraph_key"]: p["text_sha256"] for p in section["paragraphs"]}})
+                self.assertEqual(202, response.status_code, response.text)
+                for _ in range(250):
+                    job = client.get("/api/v1/jobs/" + response.json()["id"]).json()
+                    if job["status"] not in {"queued", "running"}:
+                        break
+                    time.sleep(.03)
+                self.assertEqual("succeeded", job["status"], job)
+                context = self.last_dialogue["section_context"]
+                self.assertEqual(reference["text"], context["cross_chapter_context"]["paragraphs"][0]["text"])
+                self.assertEqual({reference["paragraph_id"]: reference["text_sha256"]}, self.last_dialogue["dependency_hashes"])
+                self.assertTrue(all("locators" not in s for s in context["outline"]))
+                self.assertTrue(set(job["result"]["routing"]["targets"]).issubset({p["paragraph_id"] for p in section["paragraphs"]}))
+            self.assertEqual(1, self.scope_call_count)
+            after = client.get(base).json()
+            self.assertEqual(before["draft_artifact_id"], after["draft_artifact_id"])
+            candidate = next(c for c in after["rewrite_candidates"] if c.get("batch_job_id") == job["id"])
+            accepted = client.post(base + "/dialogue-candidates/" + candidate["candidate_id"] + "/accept")
+            self.assertEqual(200, accepted.status_code, accepted.text)
+            updated = client.get(base).json()
+            self.assertEqual(other, next(s for s in updated["sections"] if s["section_id"] == other["section_id"]))
+
     def test_global_plan_without_located_issues_keeps_paragraphs_without_rewriting(self):
         with TestClient(self.app) as client:
             self.prepare_draft(client)
@@ -202,7 +267,8 @@ class ParagraphDialogueTests(fixtures.DraftsV1Tests):
             if payload["dialogue"].get("coherence_only"):
                 return {"coherence_plan": getattr(self, "coherence_plan", {"status": "unavailable", "issues": []})}
             if payload["dialogue"].get("route_only"):
-                return {"routing": {"mode": "revision", "targets": payload["dialogue"]["route_allowed_ids"], "related": []}}
+                self.scope_call_count = getattr(self, "scope_call_count", 0) + 1
+                return {"routing": {"mode": "revision", "targets": payload["dialogue"]["route_allowed_ids"], "related": getattr(self, "scope_related", [])}}
             self.last_dialogue = payload["dialogue"]
             self.rewrite_paragraph_ids = getattr(self, "rewrite_paragraph_ids", []) + [payload["paragraph_id"]]
             if getattr(self, "fail_paragraph", "") == payload["paragraph_id"]:

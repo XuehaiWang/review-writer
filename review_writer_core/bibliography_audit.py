@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -19,6 +20,74 @@ from .publication_metadata import (
     read_pdf_first_page_text,
     resolve_local_publication_extraction,
 )
+
+
+# Bump when any audit rule changes, so unchanged re-runs stay cheap while a rule
+# change still re-verifies every paper.
+AUDIT_RULES_VERSION = 2
+_FINGERPRINT_FIELDS = (
+    "title",
+    "authors",
+    "year",
+    "journal",
+    "doi",
+    "volume",
+    "issue",
+    "pages",
+    "article_number",
+    "publication_status",
+)
+
+
+def bibliography_input_fingerprint(metadata: dict[str, Any], markdown_text: str) -> str:
+    """Identify everything an audit result depends on.
+
+    Re-queuing the same paper with the same document and the same canonical
+    fields cannot produce a different verdict, so the previous audit is reused
+    instead of paying for the model again.
+    """
+
+    fields = {key: _value(metadata, key) for key in _FINGERPRINT_FIELDS}
+    source_file = metadata.get("source_file")
+    pdf_sha = (
+        str((source_file or {}).get("sha256") or "")
+        if isinstance(source_file, dict)
+        else ""
+    )
+    payload = {
+        "fields": fields,
+        "pdf": pdf_sha,
+        "markdown": hashlib.sha256(str(markdown_text or "").encode("utf-8")).hexdigest(),
+        "rules": AUDIT_RULES_VERSION,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+_TERMINAL_AUDIT_STATUSES = frozenset(
+    {"verified", "conflict", "not_found", "pending_retry"}
+)
+
+
+def bibliography_audit_reusable(
+    previous_audit: Any, *, fingerprint: str, network_mode: str = "fallback"
+) -> bool:
+    """True when re-queuing an audit cannot produce a different verdict.
+
+    A forced network retry is always executed: the caller explicitly asked for a
+    fresh provider lookup because the earlier attempt could not reach it.
+    """
+
+    if not isinstance(previous_audit, dict):
+        return False
+    if str(network_mode or "fallback").strip().casefold() == "force":
+        return False
+    if str(previous_audit.get("input_fingerprint") or "") != str(fingerprint or ""):
+        return False
+    return (
+        str(previous_audit.get("status") or "").strip().casefold()
+        in _TERMINAL_AUDIT_STATUSES
+    )
 
 
 class BibliographyResolutionError(ValueError):
@@ -257,6 +326,11 @@ def bibliography_field_readiness(
         for value in audit_row.get("unresolved_conflicts") or []
         if isinstance(value, dict)
     ]
+    manual_review_conflicts = [
+        dict(value)
+        for value in audit_row.get("manual_review_conflicts") or []
+        if isinstance(value, dict)
+    ]
     missing = list(dict.fromkeys(missing))
     polluted = list(dict.fromkeys(polluted))
     return {
@@ -268,6 +342,7 @@ def bibliography_field_readiness(
         "polluted_fields": polluted,
         "author_quality_issues": author_issues,
         "unresolved_conflicts": unresolved_conflicts,
+        "manual_review_conflicts": manual_review_conflicts,
         "ready": not missing and not polluted and not unresolved_conflicts,
     }
 
@@ -440,7 +515,7 @@ def resolve_bibliography(
     for field, value in fields.items():
         if field in {"document_type", "parent_paper_id"}:
             continue
-        if _normalized_field(field, _value(updated_metadata, field)) == _normalized_field(field, value):
+        if _field_values_equivalent(field, _value(updated_metadata, field), value):
             current = updated_metadata.get(field)
             if isinstance(current, dict) and not current.get("human_checked"):
                 updated_metadata[field] = _human_field(value, source)
@@ -556,6 +631,22 @@ def _mineru_record_is_locally_complete(
     return bool(readiness.get("ready"))
 
 
+def _strip_accents(value: Any) -> str:
+    """Fold accents so `Anaelle` and `Ana ëelle` compare as the same name."""
+
+    decomposed = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+# Leading affiliation / footnote markers publishers glue onto a byline
+# (`a Guowei Kang`, `ab Sreekumar Vellalath`).  They need a following
+# capital, so genuine particles such as `van der` or `de la` survive.
+_AUTHOR_LEADING_ROLE = re.compile(
+    r"^(?:\[[a-z0-9]{1,3}\]|\([a-z0-9]{1,3}\)|[a-z]{1,3}[.)\]]?)\s+(?=[A-Z][a-z])"
+)
+_AUTHOR_MARKUP = re.compile(r"<[^>]*>")
+
+
 def _author_keys(authors: Any) -> set[str]:
     values = authors if isinstance(authors, list) else [authors] if authors else []
     keys = set()
@@ -567,12 +658,18 @@ def _author_keys(authors: Any) -> set[str]:
                     part for part in (value.get("given"), value.get("family")) if part
                 )
             )
-        cleaned = html.unescape(re.sub(r"<[^>]*>", " ", str(value or "")))
+        cleaned = _strip_accents(html.unescape(_AUTHOR_MARKUP.sub(" ", str(value or ""))))
         # MinerU sometimes keeps multiple authors and HTML footnote fragments in
         # one list item.  Compare the actual names, not the serialized markup.
         for name in re.split(r"\s+(?:and|&)\s+|\s*;\s*", cleaned, flags=re.IGNORECASE):
+            name = str(name or "").strip()
+            while True:
+                stripped = _AUTHOR_LEADING_ROLE.sub("", name)
+                if stripped == name:
+                    break
+                name = stripped
             key = re.sub(
-                r"[^a-z0-9\u4e00-\u9fff]+", "", str(name or "").casefold()
+                r"[^a-z0-9\u4e00-\u9fff]+", "", name.casefold()
             )
             if key and key not in {"and", "sup"}:
                 keys.add(key)
@@ -611,6 +708,13 @@ def _provider_exclusion_reason(metadata: dict[str, Any], candidate: dict[str, An
     """Separate a different publication from conflicting fields of one paper."""
     expected_doi = normalize_doi(_value(metadata, "doi"))
     candidate_doi = normalize_doi((candidate.get("identifiers") or {}).get("doi") or candidate.get("doi"))
+    expected_title = _provider_title(_value(metadata, "title"))
+    candidate_title = _provider_title(candidate.get("title"))
+    # A matching DOI may itself be polluted legacy metadata. It must not
+    # authorize mixing a clearly different title's journal/authors into it.
+    if (len(expected_title) >= 20 and len(candidate_title) >= 20
+            and SequenceMatcher(None, expected_title, candidate_title).ratio() < 0.7):
+        return "different_publication_title"
     if expected_doi and candidate_doi == expected_doi:
         return ""
     if (expected_doi and candidate_doi and expected_doi != candidate_doi
@@ -721,11 +825,70 @@ def _candidate_value(candidate: dict[str, Any], field: str) -> Any:
     return candidate.get(field)
 
 
+_TITLE_MARKUP = re.compile(r"<[^>]*>")
+_TITLE_COMMAND = re.compile(r"\\[a-zA-Z]+")
+_TITLE_DASH = re.compile(r"[\u2010-\u2015\u2212]")
+_JOURNAL_STOPWORDS = frozenset({"of", "the", "and", "for", "in", "on", "a", "an", "to"})
+
+
+def _title_key(value: Any) -> str:
+    """Fold publisher markup, LaTeX and spacing out of a title before comparison."""
+
+    text = _strip_accents(html.unescape(_TITLE_MARKUP.sub(" ", str(value or "")))).casefold()
+    text = _TITLE_DASH.sub("-", text)
+    text = _TITLE_COMMAND.sub(" ", text)
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+
+
+def _journal_tokens(value: Any) -> list[str]:
+    text = _strip_accents(html.unescape(_TITLE_MARKUP.sub(" ", str(value or "")))).casefold()
+    return [token for token in re.split(r"[^a-z0-9]+", text) if token]
+
+
+def _is_abbreviation_of(short: list[str], long: list[str]) -> bool:
+    """`j am chem soc` is an abbreviation of `journal of the american chemical society`.
+
+    Every abbreviated token must be a prefix of the next meaningful long-form
+    token, in order.  That keeps distinct journals apart — `Nat. Commun.` and
+    `Nat. Chem.` share initials but never prefix-match each other's words.
+    """
+
+    if not short or not long or len(short) > len(long):
+        return False
+    index = 0
+    abbreviated = len(short) < len(long)
+    for token in short:
+        while index < len(long) and long[index] in _JOURNAL_STOPWORDS:
+            index += 1
+        if index >= len(long) or not long[index].startswith(token):
+            return False
+        if token != long[index]:
+            abbreviated = True
+        index += 1
+    # Leftover meaningful words mean the abbreviation only covers part of the name.
+    while index < len(long) and long[index] in _JOURNAL_STOPWORDS:
+        index += 1
+    return abbreviated and index >= len(long)
+
+
+def _journals_equivalent(left: Any, right: Any) -> bool:
+    a, b = _journal_tokens(left), _journal_tokens(right)
+    if not a or not b:
+        return False
+    return a == b or _is_abbreviation_of(a, b) or _is_abbreviation_of(b, a)
+
+
 def _normalized_field(field: str, value: Any) -> str:
     if field == "doi":
         return normalize_doi(value)
-    if field in {"title", "journal"}:
-        return normalize_title(value)
+    if field == "title":
+        return _title_key(value)
+    if field == "journal":
+        # Journals have no lossless canonical key: `Nat. Commun.` and
+        # `Nat. Chem.` both reduce to `nc`.  This key only separates values that
+        # cannot describe one journal; real equality is decided by
+        # `_field_values_equivalent`.
+        return " ".join(_journal_tokens(value))
     if field == "authors":
         return "|".join(sorted(_author_keys(value)))
     if field in {"year", "bibliographic_year"}:
@@ -744,6 +907,115 @@ def _normalized_field(field: str, value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+_DOI_TAIL_ARTIFACT = re.compile(r"^[.\-]?(?:org|com|net|htm|html|pdf|full|abstract)$")
+
+
+def _dois_equivalent(left: Any, right: Any) -> bool:
+    """PDF text extraction glues the publisher domain onto a DOI's tail."""
+
+    a, b = normalize_doi(left), normalize_doi(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long = sorted((a, b), key=len)
+    return (
+        len(short) >= 10
+        and long.startswith(short)
+        and bool(_DOI_TAIL_ARTIFACT.match(long[len(short) :]))
+    )
+
+
+def _field_values_equivalent(field: str, left: Any, right: Any) -> bool:
+    """True when two sources describe the same fact, notation aside."""
+
+    if field == "doi":
+        return _dois_equivalent(left, right)
+    if field == "journal":
+        return _journals_equivalent(left, right)
+    if field == "title":
+        return bool(_title_key(left)) and _title_key(left) == _title_key(right)
+    if field == "authors":
+        keys_left, keys_right = _author_keys(left), _author_keys(right)
+        return bool(keys_left) and keys_left == keys_right
+    if field == "first_publication_date":
+        # A year-only value and a year-month value of the same year describe the
+        # same publication; neither contradicts the other.
+        a, b = _normalized_field(field, left), _normalized_field(field, right)
+        return bool(a) and bool(b) and a.split("-")[0] == b.split("-")[0]
+    return _normalized_field(field, left) == _normalized_field(field, right)
+
+
+def _field_values_conflict(field: str, values: list[Any]) -> bool:
+    """True only when two supplied values genuinely contradict each other."""
+
+    present = [value for value in values if _normalized_field(field, value)]
+    for index, left in enumerate(present):
+        for right in present[index + 1 :]:
+            if not _field_values_equivalent(field, left, right):
+                return True
+    return False
+
+
+# Where a fact legitimately comes from.  A provider that matched the paper's
+# identity is curated data; the PDF states its own DOI; the canonical value is
+# whatever an earlier pass guessed; the bounded agent is a hint, not evidence.
+_PROVIDER_SOURCES = frozenset(
+    {"crossref", "openalex", "semantic_scholar", "pubmed", "europe_pmc", "arxiv", "datacite", "doi"}
+)
+_SOURCE_AUTHORITY = {
+    "canonical_metadata": 40,
+    "pdf_first_page": 50,
+    "local_document": 30,
+    "bounded_document_agent": 20,
+}
+
+
+def _source_authority(field: str, source: Any) -> int:
+    name = str(source or "")
+    if name in _PROVIDER_SOURCES:
+        # A provider that matched the paper's identity is curated primary evidence,
+        # on the same footing as the PDF the paper was ingested from.
+        return 50
+    return int(_SOURCE_AUTHORITY.get(name, 35))
+
+
+def _cluster_items(field: str, items: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    clusters: list[list[dict[str, Any]]] = []
+    for item in items:
+        for cluster in clusters:
+            if _field_values_equivalent(field, cluster[0].get("value"), item.get("value")):
+                cluster.append(item)
+                break
+        else:
+            clusters.append([item])
+    return clusters
+
+
+def _authoritative_cluster(
+    field: str, items: list[dict[str, Any]]
+) -> list[dict[str, Any]] | None:
+    """Pick the winning source group when one is strictly the most authoritative.
+
+    Two sources of equal standing that disagree stay unresolved for a human; a
+    well-sourced value beating a weaker hint is not a genuine contradiction.
+    """
+
+    ranked = sorted(
+        _cluster_items(field, items),
+        key=lambda cluster: -max(
+            _source_authority(field, item.get("source")) for item in cluster
+        ),
+    )
+    if not ranked:
+        return None
+    if len(ranked) == 1:
+        return ranked[0]
+    top = max(_source_authority(field, item.get("source")) for item in ranked[0])
+    runner_up = max(_source_authority(field, item.get("source")) for item in ranked[1])
+    return ranked[0] if top > runner_up else None
+
+
 def _local_extraction_value(local_extraction: dict[str, Any], field: str) -> Any:
     basic = local_extraction.get("basic_info") or {}
     evidence = local_extraction.get("publication_evidence") or {}
@@ -759,6 +1031,102 @@ def _local_extraction_value(local_extraction: dict[str, Any], field: str) -> Any
         if local_extraction.get("status") == "reliable":
             return "issue_assigned"
     return None
+
+
+def _suggested_correction(conflict: dict[str, Any]) -> dict[str, Any] | None:
+    """The best-sourced alternative to a manually confirmed value."""
+
+    field = str(conflict.get("field") or "")
+    candidates = [
+        item
+        for item in conflict.get("candidates") or []
+        if isinstance(item, dict)
+        and item.get("source") != "canonical_metadata"
+        and _normalized_field(field, item.get("value"))
+    ]
+    if not candidates:
+        return None
+    best = max(
+        candidates,
+        key=lambda item: (
+            _source_authority(field, item.get("source")),
+            float(item.get("confidence") or 0.0),
+        ),
+    )
+    return {
+        "source": best.get("source"),
+        "value": best.get("value"),
+        "confidence": best.get("confidence"),
+    }
+
+
+def _excluded_doi_suggestions(source_rows: dict[str, Any]) -> list[dict[str, Any]]:
+    """Provider DOIs rejected as a different publication, but with a matching title."""
+
+    suggestions: list[dict[str, Any]] = []
+    for name, row in (source_rows or {}).items():
+        if not isinstance(row, dict):
+            continue
+        for item in row.get("excluded_candidates") or []:
+            if not isinstance(item, dict) or item.get("reason") != "different_publication_doi":
+                continue
+            candidate = item.get("candidate")
+            if not isinstance(candidate, dict):
+                continue
+            value = (candidate.get("identifiers") or {}).get("doi") or candidate.get("doi")
+            if str(value or "").strip():
+                suggestions.append({
+                    "source": str(name),
+                    "value": value,
+                    "confidence": None,
+                    "reason": "different_publication_doi",
+                })
+    return suggestions
+
+
+def _manual_review_conflicts(
+    metadata: dict[str, Any],
+    unresolved: list[dict[str, Any]],
+    source_rows: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Contradictions on fields a human already confirmed.
+
+    A manually checked value is never overwritten automatically, but silently
+    ignoring the sources hides genuine typos.  These rows surface the conflict
+    together with the best-sourced alternative so a human can correct it.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for conflict in unresolved:
+        field = str(conflict.get("field") or "")
+        if not _field_human_checked(metadata, field):
+            continue
+        suggested = _suggested_correction(conflict)
+        if suggested is None:
+            continue
+        rows.append({**dict(conflict), "human_checked": True, "suggested": suggested})
+    if _field_human_checked(metadata, "doi") and not any(
+        row.get("field") == "doi" for row in rows
+    ):
+        # A conflicting provider DOI is filtered out as a different publication
+        # before field comparison, so it never becomes an ordinary conflict.
+        suggestions = _excluded_doi_suggestions(source_rows)
+        if suggestions:
+            rows.append({
+                "field": "doi",
+                "status": "unresolved",
+                "human_checked": True,
+                "suggested": suggestions[0],
+                "candidates": [
+                    {
+                        "source": "canonical_metadata",
+                        "value": _value(metadata, "doi"),
+                        "human_checked": True,
+                    },
+                    *suggestions,
+                ],
+            })
+    return rows
 
 
 def audit_bibliography(
@@ -927,6 +1295,11 @@ def audit_bibliography(
                     "publication_date",
                     "publication_status",
                     "journal",
+                    "volume",
+                    "issue",
+                    "pages",
+                    "article_number",
+                    "doi",
                     "landing_url",
                     "identifiers",
                 )
@@ -959,6 +1332,7 @@ def audit_bibliography(
                             "issue",
                             "pages",
                             "article_number",
+                            "doi",
                             "landing_url",
                             "identifiers",
                         )
@@ -977,6 +1351,23 @@ def audit_bibliography(
             exclusion = _provider_exclusion_reason(identity_metadata, candidate)
             if exclusion:
                 source_row.update(status="not_same_publication", exclusion_reason=exclusion)
+            else:
+                match = _candidate_score(identity_metadata, candidate)
+                source_row["match"] = match
+                source_row["status"] = "verified" if _strict_provider_identity(
+                    identity_metadata, match, pdf_doi=bool(pdf_doi)) else "conflict"
+    # Different DOI-bearing publications cannot jointly supply an automatic
+    # field-by-field identity, even when their titles/authors are near matches.
+    provider_dois = {
+        normalize_doi(_candidate_value(row["candidate"], "doi"))
+        for row in source_rows.values() if isinstance(row, dict)
+        and row.get("status") == "verified" and isinstance(row.get("candidate"), dict)
+        and normalize_doi(_candidate_value(row["candidate"], "doi"))
+    }
+    if len(provider_dois) > 1:
+        for row in source_rows.values():
+            if isinstance(row, dict) and row.get("status") == "verified":
+                row.update(status="conflict", exclusion_reason="publication_identity_conflict")
     field_provenance: dict[str, list[dict[str, Any]]] = {}
     conflicts: list[dict[str, Any]] = []
     for field in (
@@ -1081,16 +1472,14 @@ def audit_bibliography(
                     "value": value,
                     "confidence": round(confidence, 4),
                     "verification_status": source_row.get("status"),
+                    "doi_exact": bool(match.get("doi_exact")),
                 }
             )
         if provenance:
             field_provenance[field] = provenance
-        distinct = {
-            normalized
-            for item in provenance
-            if (normalized := _normalized_field(field, item.get("value")))
-        }
-        if len(distinct) > 1:
+        if _field_values_conflict(
+            field, [item.get("value") for item in provenance]
+        ):
             conflicts.append(
                 {
                     "field": field,
@@ -1112,25 +1501,23 @@ def audit_bibliography(
         ]
         if not verified_candidates:
             continue
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for item in verified_candidates:
-            grouped.setdefault(
-                _normalized_field(field, item.get("value")), []
-            ).append(item)
-        if len(grouped) != 1:
+        best_group = _authoritative_cluster(field, verified_candidates)
+        if best_group is None:
             continue
-        best_group = next(iter(grouped.values()))
         best = max(best_group, key=lambda item: float(item.get("confidence") or 0.0))
         best_confidence = float(best.get("confidence") or 0.0)
-        canonical_normalized = _normalized_field(field, _value(metadata, field))
-        candidate_normalized = _normalized_field(field, best.get("value"))
-        if best_confidence < 0.94:
+        # A provider that matched the DOI exactly is authoritative for the
+        # record's other fields even when its own similarity score is lower.
+        if best_confidence < 0.94 and not best.get("doi_exact"):
             continue
         canonical_is_polluted_author = bool(
             field == "authors"
             and not authors_are_publication_ready(_value(metadata, "authors"))
         )
-        if canonical_normalized == candidate_normalized and not canonical_is_polluted_author:
+        if (
+            _field_values_equivalent(field, _value(metadata, field), best.get("value"))
+            and not canonical_is_polluted_author
+        ):
             continue
         # Human-reviewed fields were excluded above. A literal source-grounded
         # document/provider value must beat an unreviewed parser confidence,
@@ -1143,13 +1530,26 @@ def audit_bibliography(
         }
 
     for conflict in conflicts:
-        if conflict.get("field") in canonical_updates:
+        field = str(conflict.get("field") or "")
+        if field in canonical_updates:
             conflict["status"] = "auto_resolved"
-            conflict["resolved_value"] = canonical_updates[str(conflict["field"])]["value"]
+            conflict["resolved_value"] = canonical_updates[field]["value"]
+            continue
+        if not field or _field_human_checked(metadata, field):
+            continue
+        winner = _authoritative_cluster(field, list(conflict.get("candidates") or []))
+        if winner is not None:
+            best = max(winner, key=lambda item: float(item.get("confidence") or 0.0))
+            conflict["status"] = "auto_resolved"
+            conflict["resolved_value"] = best.get("value")
+            conflict["resolved_by"] = "source_authority"
 
     unresolved_conflicts = [
         conflict for conflict in conflicts if conflict.get("status") == "unresolved"
     ]
+    manual_review_conflicts = _manual_review_conflicts(
+        metadata, unresolved_conflicts, source_rows
+    )
     statuses = {str(row.get("status") or "") for row in source_rows.values()}
     overall = (
         "conflict"
@@ -1177,7 +1577,10 @@ def audit_bibliography(
     )
     preview_readiness = bibliography_field_readiness(
         preview_metadata,
-        {"unresolved_conflicts": unresolved_conflicts},
+        {
+            "unresolved_conflicts": unresolved_conflicts,
+            "manual_review_conflicts": manual_review_conflicts,
+        },
     )
     for field in preview_readiness.get("polluted_fields") or []:
         if field in DOCUMENT_REQUIREMENTS[document_type] and field not in automatic_missing:
@@ -1252,6 +1655,7 @@ def audit_bibliography(
         "field_provenance": field_provenance,
         "conflicts": conflicts,
         "unresolved_conflicts": unresolved_conflicts,
+        "manual_review_conflicts": manual_review_conflicts,
         "canonical_updates": canonical_updates,
         "resolved_by": (
             "automatic"
@@ -1312,9 +1716,9 @@ def apply_bibliography_updates(
             continue
         if _field_human_checked(updated, field):
             continue
-        normalized_equal = _normalized_field(
-            field, _value(updated, field)
-        ) == _normalized_field(field, proposed.get("value"))
+        normalized_equal = _field_values_equivalent(
+            field, _value(updated, field), proposed.get("value")
+        )
         replace_polluted_authors = bool(
             field == "authors"
             and not authors_are_publication_ready(_value(updated, "authors"))

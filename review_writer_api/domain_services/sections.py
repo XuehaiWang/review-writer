@@ -48,9 +48,12 @@ from review_writer_core.claim_contracts import (
     argument_projection,
     claim_is_executable,
 )
-from review_writer_core.section_narrative_contracts import apply_single_paper_policy, resolve_section_depth_contract
+from review_writer_core.section_narrative_contracts import apply_single_paper_policy, resolve_section_depth_contract, build_section_writing_guidance
 from review_writer_core.evidence_integrity import normalize_retrieval_mode
 from review_writer_core.writing_contracts import derive_writing_scope_contract
+from review_writer_core.review_fact_readiness import REVIEW_READING_STRATEGY
+from review_writer_core.source_attribution import navigation_source_refs
+from review_writer_api.domain_services.library_index import EvidenceHit
 from review_writer_core.scientific_facts import (
     attach_fact_to_evidence, claim_assertion_ceiling, fact_identity, fact_is_usable, fact_usage,
     registered_fact_bindings, writable_evidence_keys, fact_claim_issues,
@@ -133,6 +136,7 @@ from review_writer_core.academic_contracts import (
     mechanism_evidence_types,
 )
 from review_writer_core.evidence_queries import (
+    boolean_query,
     build_question_query_plans,
     normalize_targeted_fact_gaps,
     registered_fact_field_ids,
@@ -182,22 +186,12 @@ class SectionsService(ArtifactBackedService):
         *,
         required: bool = True,
     ) -> tuple[dict[str, Any] | None, ArtifactRecord | None]:
-        self._owned_project(principal, project_id)
-        artifact = self.repository.get_current_artifact(
-            principal.user_id, project_id, logical_name
+        return self._read_json_optional(
+            principal,
+            project_id,
+            logical_name,
+            required=required,
         )
-        if artifact is None:
-            if required:
-                raise self._stage_not_ready(principal, project_id, logical_name)
-            return None, None
-        resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
-        try:
-            payload = json.loads(resolved.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise WorkflowConflict("The current workflow artifact is unreadable.") from exc
-        if not isinstance(payload, dict):
-            raise WorkflowConflict("The current workflow artifact is invalid.")
-        return payload, artifact
 
     @staticmethod
     def tasks_from_blueprint(blueprint: dict[str, Any]) -> list[dict[str, Any]]:
@@ -210,6 +204,11 @@ class SectionsService(ArtifactBackedService):
         policy_mode = (
             str(policy.get("mode") or "") if isinstance(policy, dict) else ""
         )
+        scope_gap_ids = {
+            str(gap.get("section_id") or "")
+            for gap in blueprint.get("scope_coverage_gaps") or []
+            if isinstance(gap, dict) and str(gap.get("section_id") or "")
+        }
         normalized_sections = sections
         if policy_mode not in {"single_primary_section_with_supporting_cross_references", "argument_based"}:
             legacy_input: list[dict[str, Any]] = []
@@ -247,6 +246,8 @@ class SectionsService(ArtifactBackedService):
         tasks: list[dict[str, Any]] = []
         for section in normalized_sections:
             if not isinstance(section, dict) or not str(section.get("section_id") or ""):
+                continue
+            if str(section.get("section_id") or "") in scope_gap_ids:
                 continue
             if section.get("organizing_only"):
                 continue
@@ -320,6 +321,7 @@ class SectionsService(ArtifactBackedService):
                     "heading": str(section.get("title") or section["section_id"]),
                     "section_role": str(section.get("section_role") or "body"),
                     "core_argument": core_argument,
+                    "review_problem": section.get("review_problem"),
                     "organizing_thread": str(section.get("organizing_thread") or ""),
                     "paragraph_tasks": [v for v in section.get("paragraph_tasks", []) if isinstance(v, str)]
                         if isinstance(section.get("paragraph_tasks"), list) else [],
@@ -360,7 +362,13 @@ class SectionsService(ArtifactBackedService):
                         )
                     ),
                     "depth_contract": resolve_section_depth_contract(section),
+                    "requested_length": build_section_writing_guidance(section).get("requested_length"),
+                    "target_words": section.get("target_words"),
+                    "target_words_source": section.get("target_words_source"),
+                    "notes": section.get("notes"),
                     "evidence_mode": SOURCE_CONTRACT,
+                    **({"reading_strategy": REVIEW_READING_STRATEGY}
+                       if blueprint.get("reading_strategy") == REVIEW_READING_STRATEGY else {}),
                     "writing_objective": section.get("writing_objective") or section.get("section_thesis"),
                     "questions_to_answer": section.get("questions_to_answer") or [],
                     "retrieval_directions": section.get("retrieval_directions") or [],
@@ -414,6 +422,7 @@ class SectionsService(ArtifactBackedService):
             review_topic=review_topic,
             heading=str(task.get("heading") or ""),
             core_argument=str(task.get("core_argument") or ""),
+            review_problem=str(task.get("review_problem") or ""),
             research_questions=list(task.get("questions_to_answer") or []) + list(task.get("retrieval_directions") or []),
             section_role=str(task.get("section_role") or "body"),
             must_cover_points=list(task.get("must_cover_points") or []),
@@ -444,6 +453,17 @@ class SectionsService(ArtifactBackedService):
         project = self._owned_project(principal, project_id)
         review_topic = str(getattr(project, "topic", "") or "")
         sections: list[dict[str, Any]] = []
+        # These caches live only inside one owned, versioned preparation. Share
+        # repeated source requests across chapters, never across users or runs.
+        navigation_cache: dict[tuple[str, str, tuple[str, ...]], list] = {}
+        retrieval_cache: dict[str, list] = {}
+
+        def retrieve(query, **kwargs):
+            key = json.dumps([query, kwargs], ensure_ascii=False, sort_keys=True)
+            if key not in retrieval_cache:
+                retrieval_cache[key] = self.library_index.retrieve(principal, query, **kwargs)
+            return retrieval_cache[key]
+
         for task in tasks:
             allowed = [str(item) for item in task.get("allowed_papers") or []]
             si_parent_by_id = self._supporting_source_parents(catalog, allowed)
@@ -526,17 +546,23 @@ class SectionsService(ArtifactBackedService):
                 for plan in query_plans
             }
             relaxed_recovery_anchors: set[tuple[str, str]] = set()
+            contribution_recovery_anchors: set[tuple[str, str]] = set()
+            reading_anchors: set[tuple[str, str]] = set()
 
             def add_hits(found, *, question_id: str, retrieval_pass: str) -> None:
                 for hit in found:
                     key = (hit.paper_id, hit.chunk_id)
                     current = merged_hits.get(key)
-                    if current is None or (current["hit"].is_neighbor and not hit.is_neighbor):
+                    if current is None:
                         merged_hits[key] = {
                             "hit": hit,
                             "question_ids": set(),
                             "retrieval_passes": set(),
                         }
+                    elif current["hit"].is_neighbor and not hit.is_neighbor:
+                        # Promoting a neighbor to a direct hit must not erase
+                        # the other question memberships for this same source.
+                        current["hit"] = hit
                     merged_hits[key]["question_ids"].add(question_id)
                     merged_hits[key]["retrieval_passes"].add(retrieval_pass)
                     canonical_id = citation_paper_id(hit.paper_id)
@@ -568,8 +594,7 @@ class SectionsService(ArtifactBackedService):
                         )
                     for paper_id in per_paper_targets:
                         add_hits(
-                            self.library_index.retrieve(
-                                principal,
+                            retrieve(
                                 str(plan["websearch_query"]),
                                 allowed_papers=retrieval_ids_for(paper_id),
                                 top_k=2,
@@ -581,6 +606,18 @@ class SectionsService(ArtifactBackedService):
                             question_id=question_id,
                             retrieval_pass="per_paper_targeted",
                         )
+                        if (question_id == "section_focus" and plan.get("question_term_groups")
+                                and not question_direct[question_id][paper_id]):
+                            # A more specific review question is navigation,
+                            # not a new admission gate. Retain the original
+                            # topic route when it cannot locate a direct hit.
+                            groups = plan["required_concept_groups"]
+                            add_hits(retrieve(boolean_query(groups),
+                                allowed_papers=retrieval_ids_for(paper_id), top_k=2,
+                                per_paper_limit=2, include_neighbors=True,
+                                term_groups=groups, exact_phrases=[term for group in groups
+                                    for term in group if " " in term]),
+                                question_id=question_id, retrieval_pass="section_scope_fallback")
                         if (
                             question_id != "section_focus"
                             and not question_direct[question_id][paper_id]
@@ -592,8 +629,7 @@ class SectionsService(ArtifactBackedService):
                                 f'"{term}"' if " " in term else term
                                 for term in relaxed_terms
                             ) + ")"
-                            relaxed_hits = self.library_index.retrieve(
-                                principal,
+                            relaxed_hits = retrieve(
                                 relaxed_query,
                                 allowed_papers=retrieval_ids_for(paper_id),
                                 top_k=1,
@@ -619,8 +655,7 @@ class SectionsService(ArtifactBackedService):
                                     if not hit.is_neighbor
                                 )
                     add_hits(
-                        self.library_index.retrieve(
-                            principal,
+                        retrieve(
                             str(plan["websearch_query"]),
                             allowed_papers=retrieval_allowed,
                             top_k=global_limit,
@@ -631,6 +666,66 @@ class SectionsService(ArtifactBackedService):
                         question_id=question_id,
                         retrieval_pass="global_comparison",
                     )
+
+                # A primary paper can be marked "covered" by its introduction
+                # even when all extracted fact cards describe prior work.  Add
+                # a tiny sample from its own indexed body before the evidence
+                # budget; the writer must still verify what those pages claim.
+                recover_contribution = getattr(self.library_index, "primary_contribution_hits", None)
+                if callable(recover_contribution):
+                    for paper_id in primary:
+                        matrix_row = (matrix_rows or {}).get(paper_id) or {}
+                        if any(
+                            isinstance(fact, dict)
+                            and fact.get("study_ownership") == "own_results"
+                            and fact_is_usable(fact, purpose="detail")
+                            for fact in matrix_row.get("scientific_facts") or []
+                        ):
+                            continue
+                        analysis = matrix_row.get("paper_analysis") or {}
+                        contribution = str(analysis.get("contribution") or "") if isinstance(analysis, dict) else ""
+                        found = recover_contribution(
+                            principal, paper_id=paper_id,
+                            contribution=contribution or str(catalog[paper_id].title),
+                            limit=2,
+                        )
+                        add_hits(found, question_id="primary_contribution",
+                                 retrieval_pass="primary_contribution_recovery")
+                        contribution_recovery_anchors.update(
+                            (hit.paper_id, hit.chunk_id) for hit in found
+                        )
+
+                # A reading candidate is a location hint, not a verified fact.
+                # Resolve the full registered chunk independently of its value,
+                # ownership or model confidence. Never attach it as a fact binding.
+                resolver = getattr(self.library_index, "resolve_source_chunks", None)
+                if task.get("reading_strategy") == REVIEW_READING_STRATEGY and callable(resolver):
+                    for paper_id in allowed:
+                        groups: dict[tuple[str, str], set[str]] = {}
+                        for ref in navigation_source_refs((matrix_rows or {}).get(paper_id) or {}):
+                            source_id = str(ref.get("source_file_id") or paper_id)
+                            lineage = str(ref.get("source_lineage_hash") or "")
+                            chunk_id = str(ref.get("chunk_id") or "")
+                            if (source_id not in retrieval_ids_for(paper_id) or chunk_id == "abstract"
+                                    or not lineage or lineage != str((index_summaries.get(source_id) or {}).get("source_lineage_hash") or "")
+                                    or ref.get("evidence_key") != academic_evidence_key(source_id, chunk_id, lineage)):
+                                continue
+                            groups.setdefault((source_id, lineage), set()).add(chunk_id)
+                        for (source_id, lineage), chunks in groups.items():
+                            key = (source_id, lineage, tuple(sorted(chunks)))
+                            if key not in navigation_cache:
+                                navigation_cache[key] = resolver(principal, source_id, list(key[2]), expected_lineage=lineage)
+                            found = [EvidenceHit(
+                                paper_id=source_id, chunk_id=row["chunk_id"], content=row["content"],
+                                page_start=row.get("page_start"), page_end=row.get("page_end"),
+                                section_path=tuple(row.get("section_path") or []), content_type=row.get("content_type") or "text",
+                                asset_refs=(), score=0.0, match_reason="reading_source_navigation", is_neighbor=False,
+                                index_id="", source_lineage_hash=lineage,
+                            ) for row in navigation_cache[key]
+                                if row.get("chunk_id") in chunks and row.get("content")
+                                and row.get("source_lineage_hash") == lineage and row.get("paper_id") == source_id]
+                            add_hits(found, question_id="section_focus", retrieval_pass="reading_source_navigation")
+                            reading_anchors.update((hit.paper_id, hit.chunk_id) for hit in found)
 
                 # Dynamic evidence budget: preserve one real anchor for every
                 # matched primary paper, then spend the remaining budget on
@@ -653,7 +748,7 @@ class SectionsService(ArtifactBackedService):
                 # the dynamic budget with those recovered anchors before
                 # spending the remaining budget on general comparison hits.
                 selected_direct: set[tuple[str, str]] = set(
-                    relaxed_recovery_anchors
+                    relaxed_recovery_anchors | contribution_recovery_anchors | reading_anchors
                 )
                 for paper_id in primary:
                     best = next(
@@ -866,7 +961,7 @@ class SectionsService(ArtifactBackedService):
                         ):
                             continue
                         fact_claim_eligible = fact_is_usable(fact, purpose="detail")
-                        abstract_fact = fact_usage(fact) == "background"
+                        abstract_fact = fact_usage(fact) in {"background", "navigation"}
                         # Usage outranks legacy labels: an abstract-only card
                         # may still carry support_level=direct in old Matrix
                         # data. Repetition must not strengthen that evidence.
@@ -993,7 +1088,7 @@ class SectionsService(ArtifactBackedService):
                         routes[fact_route["fact_id"]] = fact_route
                         existing["fact_routes"] = list(routes.values())
                         existing["background_eligible"] = any(
-                            fact_usage(binding) == "background" for binding in existing.get("fact_bindings") or []
+                            fact_usage(binding) in {"background", "navigation"} for binding in existing.get("fact_bindings") or []
                         )
                         if fact_claim_eligible:
                             for question_id in mapped_questions:
@@ -1374,6 +1469,13 @@ class SectionsService(ArtifactBackedService):
                         (index_summaries.get(pid) or {}).get("fulltext") == "ready" for pid in allowed
                     ),
                     "hit_count": len(hit_rows),
+                    **({"source_manifest": {
+                        source_id: {"paper_id": citation_paper_id(source_id),
+                                    "source_lineage_hash": summary["source_lineage_hash"]}
+                        for source_id, summary in index_summaries.items()
+                        if source_id in retrieval_allowed and summary.get("fulltext") == "ready"
+                        and summary.get("source_lineage_hash")
+                    }} if task.get("reading_strategy") == REVIEW_READING_STRATEGY else {}),
                     "claim_eligible_hit_count": len(usable_hits),
                     "paper_count": len(evidence_papers),
                     "primary_paper_count": len(primary),
@@ -2173,6 +2275,10 @@ class SectionsService(ArtifactBackedService):
                                         for r in p.get("claim_realizations") or [] if r.get("claim_id") == claim_id), {})
                     if not valid_source_claim(claim, fact_sources, text=realization.get("text", "")):
                         raise WorkflowValidationError("A Claim source passage or checked wording has changed.",
+                            details={"section_id": section_id, "claim_id": claim_id})
+                    if (task_by_section.get(section_id, {}).get("reading_strategy") == REVIEW_READING_STRATEGY
+                            and (claim.get("source_verification") or {}).get("status") != "supported"):
+                        raise WorkflowValidationError("Review-reading prose requires an actual source audit.",
                             details={"section_id": section_id, "claim_id": claim_id})
                 if not planned_fact_ids.issubset(ref_fact_ids):
                     raise WorkflowValidationError(

@@ -1,5 +1,6 @@
 """A Matrix job publishes only after every paper checkpoint is present."""
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -73,3 +74,53 @@ def test_matrix_job_waits_for_delegated_model_then_resumes_existing_checkpoint()
     assert builder.call_count == 2
     assert builder.call_args.args[1]["resume_checkpoint"] == checkpoint
     planning.publish_matrix_enrichment.assert_called_once()
+
+
+@pytest.mark.parametrize("ready_status", ["succeeded", "failed"])
+def test_matrix_job_consumes_ready_child_while_sibling_is_still_running(ready_status):
+    handlers = {}
+    jobs = SimpleNamespace(register_handler=lambda name, handler: handlers.update({name: handler}))
+    planning = Mock()
+    parent = SimpleNamespace(result={})
+    children = {key: SimpleNamespace(project_id="project", job_type="model.dispatch",
+                                     status="running", error_code="")
+                for key in ("slow", "ready", "replacement")}
+    repository = SimpleNamespace(get_job=lambda _user, key: parent if key == "parent" else children[key],
+                                 update_job_progress=Mock())
+    context = SimpleNamespace(user_id="user", project_id="project", job_id="parent",
+        retry_of_job_id=None, lease_token="lease", lease_generation=1, repository=repository,
+        report_progress=Mock(), checkpoint=Mock())
+    context.report_partial_result = lambda result: setattr(parent, "result", deepcopy(result))
+    initial = {"source_matrix_artifact_id": "matrix", "completed_papers": [], "entries": {}}
+    advanced = {"source_matrix_artifact_id": "matrix", "completed_papers": ["P2"],
+                "entries": {"P2": {"result": {"paper_id": "P2", "status": ready_status}}}}
+    calls = []
+
+    def build(ctx, payload):
+        calls.append(deepcopy(payload))
+        if len(calls) == 1:
+            ctx.report_partial_result({"matrix_enrichment_checkpoint": initial})
+            raise ScientificModelDeferred("slow", model_job_ids=["slow", "ready"])
+        assert payload["resume_checkpoint"] == initial
+        ctx.report_partial_result({"matrix_enrichment_checkpoint": advanced})
+        raise ScientificModelDeferred("slow", model_job_ids=["slow", "replacement"])
+
+    register_planning_handlers(planning, jobs, {"matrix.enrich": build})
+    payload = {"source_matrix_artifact_id": "matrix", "pending_paper_count": 3,
+               "fulltext_indexed_paper_count": 3,
+               "papers": [{"paper_id": f"P{i}"} for i in range(1, 4)]}
+    handler = handlers["matrix.enrich"]
+    with pytest.raises(JobYieldRequested):
+        handler(context, payload)
+    assert parent.result["waiting_model_job_ids"] == ["slow", "ready"]
+    with pytest.raises(JobYieldRequested):
+        handler(context, payload)
+    assert len(calls) == 1
+
+    children["ready"].status = ready_status
+    with pytest.raises(JobYieldRequested):
+        handler(context, payload)
+    assert len(calls) == 2
+    assert parent.result["matrix_enrichment_checkpoint"] == advanced
+    assert parent.result["waiting_model_job_ids"] == ["slow", "replacement"]
+    planning.publish_matrix_enrichment.assert_not_called()

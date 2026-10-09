@@ -11,7 +11,7 @@ DEFAULT_SECTION_CONCURRENCY = 2
 def chapter_responsibilities(tasks):
     """One shared snapshot for writing, audit, and checkpoint invalidation."""
     return [{key: task.get(key) for key in (
-        "section_id", "heading", "writing_objective", "questions_to_answer", "avoid_points",
+        "section_id", "heading", "writing_objective", "review_problem", "avoid_points",
         "primary_papers", "supporting_papers", "paper_roles", "paragraph_tasks")}
         for task in tasks]
 

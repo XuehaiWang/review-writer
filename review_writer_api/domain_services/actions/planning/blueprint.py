@@ -10,6 +10,7 @@ from review_writer_core.claim_contracts import ARGUMENT_CONTRACT
 from review_writer_core.academic_contracts import blueprint_taxonomy_diagnostics
 from review_writer_core.scientific_facts import fact_is_usable, fact_support_spans, fact_needs_verification
 from review_writer_core.classification_axes import classification_contract_from_document
+from review_writer_core.review_fact_readiness import REVIEW_READING_STRATEGY
 from review_writer_api.database import utc_now
 from review_writer_api.errors import (
     WorkflowConflict,
@@ -121,10 +122,10 @@ class PlanningBlueprintActionsMixin:
                     if key in source:
                         row[key] = deepcopy(source[key])
 
-    def blueprint_job_payload(self, principal, project_id, *, revision):
+    def blueprint_job_payload(self, principal, project_id, *, revision, reading_strategy=REVIEW_READING_STRATEGY):
         matrix_job = self.repository.get_current_job(principal.user_id, scope="project",
             project_id=project_id, job_type="matrix.enrich", operation_key="matrix-enrichment")
-        prepared = self.prepare_blueprint(principal, project_id, revision=revision)
+        prepared = self.prepare_blueprint(principal, project_id, revision=revision, reading_strategy=reading_strategy)
         prepared["integrated_fact_enrichment"] = {
             "enabled": True,
             "mode": "reuse_current_facts_and_fill_gaps",
@@ -194,7 +195,8 @@ class PlanningBlueprintActionsMixin:
                 rebased["base_blueprint_artifact_id"] = None
                 rebased["blueprint_revision"] += int(prepared.get("blueprint_state_exists", False))
         self.validate_prepared_blueprint(principal, project_id, rebased)
-        refreshed = self.blueprint_job_payload(principal, project_id, revision=rebased["blueprint_revision"])
+        refreshed = self.blueprint_job_payload(principal, project_id, revision=rebased["blueprint_revision"],
+                                               reading_strategy=prepared.get("reading_strategy"))
         # Pinning and request metadata remain the original job's responsibility.
         refreshed.pop("await_matrix_job_id", None)
         return refreshed

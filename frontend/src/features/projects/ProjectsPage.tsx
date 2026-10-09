@@ -12,6 +12,7 @@ import { DeleteProjectDialog } from "../../components/DeleteProjectDialog";
 import { ModelOptions } from "../../components/ModelOptions";
 import { ErrorState } from "../../components/ErrorState";
 import { useUiText } from "../../i18n/useUiText";
+import { projectWorkflowPath, workflowStage } from "../../workflow";
 
 type ProjectFields = {
   slug: string;
@@ -21,27 +22,33 @@ type ProjectFields = {
 };
 
 function continuationPath(project: Project) {
-  const paths: Record<string, string> = { planning: "/planning", matrix: "/planning", blueprint: "/sections", sections: "/sections", images: "/images", figures: "/images", "figure-review": "/images", draft: "/draft", final: "/final" };
-  const path = paths[project.current_stage] || (project.discovery_status && project.discovery_status !== "pending" ? "/discovery" : "/library");
-  return `${path}?project=${encodeURIComponent(project.project_id)}`;
+  return projectWorkflowPath(project.current_stage, project.project_id);
 }
 
-function publicTaxonomyProfileId(profile: string) {
-  return profile === "allene" ? "chemistry_general" : profile;
-}
+// The backend maps legacy private profile ids onto the public catalog, so the
+// browser never needs its own alias table or fallback copy of that catalog.
+const DISCOVERY_STATUS_LABELS: Record<string, [string, string]> = {
+  pending: ["未开始", "Not started"],
+  running: ["进行中", "In progress"],
+  review: ["待确认", "Awaiting review"],
+  approved: ["已确认", "Approved"],
+  failed: ["失败", "Failed"],
+  stale: ["需更新", "Needs update"],
+};
 
 function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxonomyProfiles, pendingTaxonomyProfile, onModelChange, onTaxonomyChange, onConfirmTaxonomyChange, onCancelTaxonomyChange, onDelete }: { project: Project; deleting: boolean; modelUpdating: boolean; taxonomyUpdating: boolean; taxonomyProfiles: TaxonomyProfile[]; pendingTaxonomyProfile: string; onModelChange: (project: Project, modelTier: Project["model_tier"]) => void; onTaxonomyChange: (project: Project, profile: string) => void; onConfirmTaxonomyChange: (project: Project, profile: string) => void; onCancelTaxonomyChange: () => void; onDelete: (project: Project) => void }) {
   const { text } = useUiText();
-  const visibleProfileId = publicTaxonomyProfileId(project.taxonomy_profile);
-  const profile = taxonomyProfiles.find((item) => item.id === visibleProfileId);
+  const stage = workflowStage(project.current_stage);
+  const profile = taxonomyProfiles.find((item) => item.id === project.taxonomy_profile);
+  const statusLabel = DISCOVERY_STATUS_LABELS[project.discovery_status];
   return (
     <article className="project-card">
       <div className="project-card-head">
         <div>
-          <span className="project-kicker">{project.current_stage || "discovery"}</span>
+          <span className="project-kicker">{stage ? `${stage.stage} · ${text(stage.hintZh, stage.hintEn)}` : text("文献准备", "Sources")}</span>
           <h3>{project.slug}</h3>
         </div>
-        <span className="badge">{project.discovery_status || "pending"}</span>
+        <span className="badge">{statusLabel ? text(statusLabel[0], statusLabel[1]) : project.discovery_status || text("未开始", "Not started")}</span>
       </div>
       <p>{project.topic || text("尚未填写研究主题", "No research topic yet")}</p>
       <div className="project-card-controls">
@@ -54,7 +61,7 @@ function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxon
           </div>
           <label className="project-card-field project-taxonomy-field">
             <span className="project-card-field-label">{text("分类", "Taxonomy")}</span>
-            <select value={visibleProfileId} disabled={taxonomyUpdating} onChange={(event) => onTaxonomyChange(project, event.target.value)}>
+            <select value={project.taxonomy_profile} disabled={taxonomyUpdating || !taxonomyProfiles.length} onChange={(event) => onTaxonomyChange(project, event.target.value)}>
               {taxonomyProfiles.map((item) => <option key={item.id} value={item.id}>{text(item.label_zh, item.label_en)}</option>)}
             </select>
             <small>{profile ? text(profile.description_zh, profile.description_en) : project.taxonomy_profile}</small>
@@ -74,6 +81,7 @@ function ProjectCard({ project, deleting, modelUpdating, taxonomyUpdating, taxon
           <Link className="button button-primary" to={continuationPath(project)}>{text("继续项目", "Continue project")}</Link>
         </div>
       </div>
+      {project.outline_state === "unknown" ? <div className="message message-error" role="alert"><p>{text("该项目的大纲或矩阵产物无法读取，阶段信息可能不完整。请检查产物或重新生成大纲。", "A stored outline or matrix artifact could not be read, so the recorded stage may be incomplete. Check the artifacts or regenerate the outline.")}</p></div> : null}
       {pendingTaxonomyProfile ? <div className="message message-warning" role="status"><p>{text("该项目已经进入 Matrix。保存新的分类配置会保留已有产物，但把 Matrix 及后续阶段标记为需更新。", "This project has entered Matrix. Saving the new taxonomy profile preserves existing artifacts but marks Matrix and all downstream stages stale.")}</p><div className="button-row"><button className="button button-danger" type="button" disabled={taxonomyUpdating} onClick={() => onConfirmTaxonomyChange(project, pendingTaxonomyProfile)}>{text("确认修改", "Confirm change")}</button><button className="button button-quiet" type="button" disabled={taxonomyUpdating} onClick={onCancelTaxonomyChange}>{text("取消", "Cancel")}</button></div></div> : null}
     </article>
   );
@@ -91,6 +99,7 @@ export function ProjectsPage() {
   const form = useFormDraft<ProjectFields>("new-project", { slug: "", topic: "", taxonomy_profile: taxonomyProfiles.data?.default_profile || "chemistry_general", model_tier: "" });
   const fields = form.value;
   const change = (key: keyof ProjectFields, value: string) => form.set({ ...fields, [key]: value });
+  const selectedProfile = taxonomyProfiles.data?.items.find(item => item.id === fields.taxonomy_profile);
   const selectedModel = modelCatalog.data?.items.find(item => item.id === (fields.model_tier || modelCatalog.data.default_tier));
   const modelUnavailable = Boolean(modelCatalog.data && (!selectedModel || selectedModel.enabled === false));
   const createProject = useMutation({
@@ -146,11 +155,8 @@ export function ProjectsPage() {
   const requestTaxonomyChange = (project: Project, profile: string) => {
     if (profile === project.taxonomy_profile) return;
     updateTaxonomyProfile.reset();
-    const matrixEntered = project.completed_stages.includes("matrix") || ["matrix", "blueprint", "planning", "sections", "figure-review", "figures", "images", "draft", "final"].includes(project.current_stage);
-    if (matrixEntered) {
-      setPendingTaxonomyChange({ projectId: project.project_id, profile });
-      return;
-    }
+    // The backend owns the downstream-invalidation decision and answers 409 when
+    // confirmation is required, so the stage order is never re-derived here.
     updateTaxonomyProfile.mutate({ project, profile, confirm: false });
   };
   const confirmDelete = (project: Project) => {
@@ -163,7 +169,7 @@ export function ProjectsPage() {
       <div className="workspace-heading">
         <div>
           <p className="eyebrow">{text("托管工作台", "Hosted workspace")}</p>
-          <h1>{text("科学综述项目", "Scientific review projects")}</h1>
+          <h1>{text("化学综述项目", "Chemistry review projects")}</h1>
           <p className="muted">{text("从文献库开始，在同一项目中完成检索、写作、图像处理和最终审计。", "Start from the library and complete discovery, writing, figure processing, and final audit in one project.")}</p>
         </div>
         <a className="button button-primary" href="#create-project">{text("新建项目", "New project")}</a>
@@ -179,7 +185,7 @@ export function ProjectsPage() {
           {projects.error ? <ErrorState error={projects.error} onRetry={() => projects.refetch()} /> : null}
           {projects.data && projects.data.items.length === 0 ? <div className="empty-state">{text("还没有项目。请在右侧创建第一个项目。", "No projects yet. Create the first project on the right.")}</div> : null}
           <div className="project-list">
-            {projects.data?.items.map((project) => <ProjectCard key={project.project_id} project={project} deleting={deleteProject.isPending && deleteProject.variables?.project_id === project.project_id} modelUpdating={updateModelTier.isPending && updateModelTier.variables?.project.project_id === project.project_id} taxonomyUpdating={updateTaxonomyProfile.isPending && updateTaxonomyProfile.variables?.project.project_id === project.project_id} taxonomyProfiles={taxonomyProfiles.data?.items || [{ id: "general_academic", label_zh: "通用学术", label_en: "General Academic", description_zh: "不启用化学领域规则。", description_en: "No chemistry domain rules.", domain_rules_enabled: false }, { id: "chemistry_general", label_zh: "通用化学", label_en: "General Chemistry", description_zh: "启用化学扩展和标签加权。", description_en: "Enables chemistry expansion and tag weighting.", domain_rules_enabled: true }]} pendingTaxonomyProfile={pendingTaxonomyChange?.projectId === project.project_id ? pendingTaxonomyChange.profile : ""} onModelChange={(item, modelTier) => updateModelTier.mutate({ project: item, modelTier })} onTaxonomyChange={requestTaxonomyChange} onConfirmTaxonomyChange={(item, profile) => updateTaxonomyProfile.mutate({ project: item, profile, confirm: true })} onCancelTaxonomyChange={() => setPendingTaxonomyChange(null)} onDelete={confirmDelete} />)}
+            {projects.data?.items.map((project) => <ProjectCard key={project.project_id} project={project} deleting={deleteProject.isPending && deleteProject.variables?.project_id === project.project_id} modelUpdating={updateModelTier.isPending && updateModelTier.variables?.project.project_id === project.project_id} taxonomyUpdating={updateTaxonomyProfile.isPending && updateTaxonomyProfile.variables?.project.project_id === project.project_id} taxonomyProfiles={taxonomyProfiles.data?.items || []} pendingTaxonomyProfile={pendingTaxonomyChange?.projectId === project.project_id ? pendingTaxonomyChange.profile : ""} onModelChange={(item, modelTier) => updateModelTier.mutate({ project: item, modelTier })} onTaxonomyChange={requestTaxonomyChange} onConfirmTaxonomyChange={(item, profile) => updateTaxonomyProfile.mutate({ project: item, profile, confirm: true })} onCancelTaxonomyChange={() => setPendingTaxonomyChange(null)} onDelete={confirmDelete} />)}
           </div>
           {deleteProject.error ? <p className="message message-error" role="alert"><LocalizedError error={deleteProject.error} /></p> : null}
           {updateTaxonomyProfile.error ? <p className="message message-error" role="alert"><LocalizedError error={updateTaxonomyProfile.error} /></p> : null}
@@ -203,11 +209,10 @@ export function ProjectsPage() {
             <label>{text("研究主题", "Research topic")}<textarea rows={5} maxLength={10_000} value={fields.topic} onChange={event => change("topic", event.target.value)} /></label>
             <label>
               {text("分类配置", "Taxonomy profile")}
-              <select value={fields.taxonomy_profile} onChange={event => change("taxonomy_profile", event.target.value)}>
+              <select value={fields.taxonomy_profile} disabled={!taxonomyProfiles.data} onChange={event => change("taxonomy_profile", event.target.value)}>
                 {(taxonomyProfiles.data?.items || []).map((profile) => <option key={profile.id} value={profile.id}>{text(profile.label_zh, profile.label_en)}</option>)}
-                {!taxonomyProfiles.data ? <><option value="general_academic">{text("通用学术", "General Academic")}</option><option value="chemistry_general">{text("通用化学", "General Chemistry")}</option></> : null}
               </select>
-              <small>{text("通用学术不使用化学领域规则；通用化学会在常规召回上增加化学扩展和标签加权。", "General Academic does not use chemistry rules; General Chemistry adds chemistry expansion and tag weighting to general recall.")}</small>
+              <small>{taxonomyProfiles.error ? text("分类配置读取失败，请刷新重试。", "Could not load the taxonomy catalog. Refresh and retry.") : selectedProfile ? text(selectedProfile.description_zh, selectedProfile.description_en) : text("正在加载分类配置…", "Loading taxonomy catalog…")}</small>
             </label>
             <label>
               {text("文本模型", "Text model")}
@@ -219,7 +224,6 @@ export function ProjectsPage() {
             </label>
             <PreparationNotice kind="text" model={fields.model_tier} checkCredit={false} />
             {form.storageFailed ? <p role="status">{text("浏览器无法暂存，请先复制填写的内容再离开。", "Browser storage is unavailable. Copy your inputs before leaving.")}</p> : null}
-            {form.dirty ? <button className="button button-quiet" type="button" onClick={form.clear}>{text("清空未提交内容", "Discard unsent inputs")}</button> : null}
             <button className="button button-primary button-block" type="submit" disabled={createProject.isPending || modelUnavailable || modelCatalog.isPending}>
               {createProject.isPending ? text("正在创建…", "Creating…") : text("创建项目", "Create project")}
             </button>

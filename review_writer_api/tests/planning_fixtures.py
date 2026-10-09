@@ -40,7 +40,7 @@ def offline_argument_planner(context, payload):
                 "reason_code": "out_of_scope", "reason": "Outside the explicitly saved test outline."}
                 for row in payload["matrix_snapshot"]["rows"] if row["paper_id"] not in assigned]}
         sid = label.removeprefix("blueprint-plan-")
-        section = next(s for s in payload["section_blueprint"]["sections"] if s["section_id"] == sid)
+        assert any(s["section_id"] == sid for s in payload["section_blueprint"]["sections"])
         return {"question": "What does the selected evidence establish?", "purpose": "Summarize reported contributions.",
             "questions_to_answer": ["What results are reported?"], "retrieval_directions": ["Reported results and experimental conditions"],
             "comparison_axes": [], "boundaries": [], "open_questions": []}

@@ -3,6 +3,7 @@ export type MatrixRecommendationRow = {
   role?: string;
   score?: number;
   raw_score?: number;
+  recommendation_status?: string;
 };
 
 export type MatrixRecommendationGroup = {
@@ -16,19 +17,20 @@ export type MatrixRecommendation = {
   excludedIds: Set<string>;
 };
 
+type CandidateStatus = "recommended" | "review" | "excluded";
+
 type Candidate = {
   paperId: string;
-  bestRole: string;
-  bestScore: number;
+  status: CandidateStatus;
   firstSeen: number;
 };
 
-const ROLE_PRIORITY: Record<string, number> = {
-  core_candidate: 4,
-  supporting_candidate: 3,
-  background: 2,
-  uncertain: 1,
-  excluded: 0,
+// "excluded" wins over a recommendation elsewhere in the results: a paper the
+// author explicitly excluded must never be offered as a recommended pick.
+const STATUS_PRIORITY: Record<CandidateStatus, number> = {
+  excluded: 2,
+  recommended: 1,
+  review: 0,
 };
 
 function paperId(row: MatrixRecommendationRow): string {
@@ -40,17 +42,21 @@ function score(row: MatrixRecommendationRow): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-function strongerRole(left: string, right: string): string {
-  return (ROLE_PRIORITY[right] ?? 1) > (ROLE_PRIORITY[left] ?? 1) ? right : left;
+function statusFor(row: MatrixRecommendationRow): CandidateStatus {
+  if (row.role === "excluded" || score(row) <= 0) return "excluded";
+  if (row.recommendation_status === "recommended") return "recommended";
+  return "review";
 }
 
 /**
  * Produces a deterministic, reviewable Matrix recommendation.
  *
- * Core/supporting candidates are recommended after paper-level deduplication.
- * Query groups explain retrieval coverage only and therefore never cause a
- * background paper to be selected. Uncertain/background papers remain for
- * human review and excluded/zero-score papers are never selected automatically.
+ * The screening step is a plain include/exclude decision. The fine-grained
+ * candidate roles (core/supporting/background/uncertain) never reach the
+ * Matrix, so the recommendation is derived from retrieval evidence: the
+ * server-supplied ``recommendation_status`` plus the author's explicit
+ * exclusion and a positive score. Query groups explain retrieval coverage only
+ * and therefore never cause a background paper to be selected.
  */
 export function buildMatrixRecommendation(groups: MatrixRecommendationGroup[]): MatrixRecommendation {
   const activeGroups = groups.filter((group) => group.keep !== false);
@@ -61,37 +67,25 @@ export function buildMatrixRecommendation(groups: MatrixRecommendationGroup[]): 
     for (const row of group.local_results || []) {
       const id = paperId(row);
       if (!id) continue;
-      const role = String(row.role || "uncertain");
+      const status = statusFor(row);
       const existing = candidates.get(id);
       if (existing) {
-        existing.bestRole = strongerRole(existing.bestRole, role);
-        existing.bestScore = Math.max(existing.bestScore, score(row));
+        if (STATUS_PRIORITY[status] > STATUS_PRIORITY[existing.status]) {
+          existing.status = status;
+        }
       } else {
-        candidates.set(id, {
-          paperId: id,
-          bestRole: role,
-          bestScore: score(row),
-          firstSeen: firstSeen++,
-        });
+        candidates.set(id, { paperId: id, status, firstSeen: firstSeen++ });
       }
     }
   }
 
-  const recommendedIds = new Set(
-    [...candidates.values()]
-      .filter((candidate) => candidate.bestScore > 0 && ["core_candidate", "supporting_candidate"].includes(candidate.bestRole))
-      .map((candidate) => candidate.paperId),
-  );
-
+  const recommendedIds = new Set<string>();
   const reviewIds = new Set<string>();
   const excludedIds = new Set<string>();
   for (const candidate of candidates.values()) {
-    if (recommendedIds.has(candidate.paperId)) continue;
-    if (candidate.bestRole === "excluded" || candidate.bestScore <= 0) {
-      excludedIds.add(candidate.paperId);
-    } else {
-      reviewIds.add(candidate.paperId);
-    }
+    if (candidate.status === "recommended") recommendedIds.add(candidate.paperId);
+    else if (candidate.status === "excluded") excludedIds.add(candidate.paperId);
+    else reviewIds.add(candidate.paperId);
   }
 
   return { recommendedIds, reviewIds, excludedIds };

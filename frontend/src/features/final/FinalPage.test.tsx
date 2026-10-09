@@ -46,18 +46,32 @@ it("omits the redundant overview status from the sidebar", async () => {
   expect(summary).toHaveTextContent("Final draft");
   expect(summary).toHaveTextContent("PDF");
 });
-it("omits overview controls from publication information but retains the manuscript image", async () => {
+it("omits overview controls from the preparation tab but retains the manuscript image", async () => {
   Object.assign(payload, { final_artifact_id: "f", final_current: true,
     final_draft_md: "# Review\n\n![Review overview](/api/v1/artifacts/overview/content)",
     overview_figure_exists: true, overview_figure_current: true });
   mount();
   expect(await screen.findByAltText("Review overview")).toHaveAttribute("src", "/api/v1/artifacts/overview/content");
-  fireEvent.click(screen.getByText("Publication information and checks"));
-  fireEvent.click(screen.getByRole("button", { name: "Publication information" }));
+  fireEvent.click(screen.getByText("Preparation and checks"));
+  fireEvent.click(screen.getByRole("button", { name: "Preparation and scope" }));
   expect(screen.getByText("Authors and affiliations")).toBeVisible();
   expect(screen.queryByText("Review overview figure")).not.toBeInTheDocument();
   expect(screen.queryByAltText("Review overview")).not.toBeInTheDocument();
   expect(posts()).toHaveLength(0);
+});
+
+it("shows publication metadata read-only and never edits it in Final", async () => {
+  Object.assign(payload, { final_artifact_id: "f", final_current: true,
+    front_matter: { authors: ["Ada"], affiliations: ["ACME"] } });
+  mount();
+  await screen.findByText("Final outputs");
+  fireEvent.click(screen.getByText("Preparation and checks"));
+  fireEvent.click(screen.getByRole("button", { name: "Preparation and scope" }));
+  expect(screen.getByText("Ada")).toBeVisible();
+  expect(screen.getByText("ACME")).toBeVisible();
+  expect(screen.queryByText("Save publication information")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Authors (one per line)")).not.toBeInTheDocument();
+  expect(vi.mocked(apiRequest).mock.calls.some(([url]) => String(url).includes("front-matter"))).toBe(false);
 });
 it("assembles the first approved draft once with an idempotent request", async () => {
   mount();

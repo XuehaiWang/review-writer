@@ -6,7 +6,60 @@ from types import SimpleNamespace
 import pytest
 
 from review_writer_core.stages.planning.academic_planning import enhance_blueprint
-from review_writer_core.claim_contracts import claim_is_executable, normalize_section_claim_contract
+from review_writer_core.claim_contracts import normalize_section_claim_contract
+
+
+@pytest.mark.parametrize('bad', [None, 'bad', {}, [None], [{'question': 'Q', 'point': 'P', 'source_refs': [{'paper_id': []}]}]])
+def test_optional_synthesis_malformed_input_is_nonblocking(bad):
+    from review_writer_core.stages.planning.academic_planning import _synthesis_lines
+    assert _synthesis_lines(bad, [{'paper_id': 'P1'}])['items'] == []
+
+
+def test_synthesis_source_binding_deduplication_and_budget():
+    from review_writer_core.stages.planning.academic_planning import _synthesis_lines
+    context = [{'paper_id': 'P1', 'verified_facts': [{'fact_id': 'F1'}]},
+               {'paper_id': 'P2', 'source_passages': [{'evidence_key': 'K2'}]}]
+    line = {'question': 'Where do methods differ?', 'point': 'Different measured scope, not proven superiority.',
+            'qualification': 'Conditions differ.', 'source_refs': [{'paper_id': 'P1', 'fact_id': 'F1'},
+                                                                  {'paper_id': 'P2', 'evidence_key': 'K2'}]}
+    invalid = {**line, 'source_refs': [{'paper_id': 'P2', 'fact_id': 'F1'}]}
+    result = _synthesis_lines([line, line, invalid, {**line, 'point': 'x' * 10001}], context)
+    assert len(result['items']) == 1
+    assert result['omitted_count'] == 3
+    assert result['usage'] == 'provisional_navigation_not_evidence'
+    assert result['items'][0]['qualification'] == 'Conditions differ.'
+    assert result['items'][0]['id'] == _synthesis_lines([line], context)['items'][0]['id']
+
+
+def test_old_project_without_matrix_does_not_reuse_unverifiable_navigation():
+    checkpoint = {'structure': {'synthesis': {'items': [{'point': 'Old unrelated source'}]}}}
+    result = enhance_blueprint(prepared(), model_call=lambda *a, **k: proposal(), checkpoint=checkpoint, report=lambda *a: None)
+    assert result['section_blueprint']['synthesis_navigation']['items'] == []
+    assert result['section_blueprint']['sections'][0]['planning_status'] == 'planned'
+
+
+def test_compact_planning_reuses_existing_calls_and_relevant_navigation():
+    data = prepared()
+    data['matrix_snapshot'] = {'rows': [{'paper_id': 'P1', 'title': 'A study',
+                                       'planning_source_passages': [{'evidence_key': 'K1', 'content': 'Bounded result.'}]}]}
+    calls, checkpoint = [], {}
+    def model(prompt, *, label):
+        calls.append(label)
+        if label == 'blueprint-structure':
+            return {'sections': [{**data['section_blueprint']['sections'][0], 'review_problem': 'What is supported?'}],
+                    'unused_papers': [], 'synthesis_lines': [{'question': 'What is supported?', 'point': 'A limited result.',
+                                                           'source_refs': [{'paper_id': 'P1', 'evidence_key': 'K1'}]}]}
+        assert 'A limited result.' in prompt
+        return {'question': 'What is supported?', 'organizing_thread': 'Explain the bounded result then its limits.',
+                'paragraph_tasks': ['Explain conditions and result once.'], 'retrieval_directions': ['Find measured scope'],
+                'boundaries': [], 'open_questions': [], 'paper_roles': []}
+    result = enhance_blueprint(data, model_call=model, checkpoint=checkpoint, report=lambda *a: None)
+    assert calls == ['blueprint-structure', 'blueprint-plan-S01']
+    section = result['section_blueprint']['sections'][0]
+    assert section['planning_status'] == 'planned'
+    assert section['questions_to_answer'] == ['What is supported?']
+    assert section['synthesis_navigation'][0]['source_refs'] == [{'paper_id': 'P1', 'evidence_key': 'K1'}]
+    enhance_blueprint(data, model_call=lambda *a, **k: pytest.fail('unchanged cache'), checkpoint=checkpoint, report=lambda *a: None)
 
 
 def test_missing_abstract_uses_bounded_source_passages_and_changes_cache():
@@ -160,11 +213,55 @@ def test_contribution_navigation_and_section_thread_are_preserved():
     assert section["paper_roles"][0]["presentation"] == "table"
 
 
+def test_planning_prompt_does_not_turn_sparse_evidence_into_paragraph_quota():
+    prompts = []
+
+    def model(prompt, *, label):
+        prompts.append((label, prompt))
+        return {**proposal(), "paragraph_tasks": ["Explain the supported result once."]}
+
+    result = enhance_blueprint(prepared(), model_call=model, checkpoint={}, report=lambda *a: None)
+    prompt = next(prompt for label, prompt in prompts if label.startswith("blueprint-plan-"))
+    assert "one or none when evidence is sparse" in prompt
+    assert "usually 2–4" not in prompt
+    assert result["section_blueprint"]["sections"][0]["paragraph_tasks"] == ["Explain the supported result once."]
+
+
+def test_structure_routes_by_own_outcome_not_named_input_or_cited_prior_work():
+    from review_writer_core.stages.planning.academic_planning import plan_structure
+    data = prepared()
+    data["matrix_snapshot"] = {"rows": [{"paper_id": "P1", "title": "One study"}]}
+    prompts = []
+
+    def model(prompt, *, label):
+        prompts.append(prompt)
+        return {"sections": [{"section_id": "S01", "title": "One category", "section_role": "body",
+                             "review_problem": "Which methods are demonstrated?", "primary_papers": ["P1"],
+                             "supporting_papers": []}], "unused_papers": []}
+
+    plan_structure(data, model, {})
+    assert "product or outcome of its OWN contribution" in prompts[0]
+    assert "a named substrate" in prompts[0]
+
+
 def test_malformed_paragraph_tasks_are_not_split_into_characters():
     result = enhance_blueprint(prepared(), model_call=lambda *a, **k: {**proposal(), "paragraph_tasks": "bad"},
                                checkpoint={}, report=lambda *a: None)
     section = result["section_blueprint"]["sections"][0]
     assert section["planning_status"] != "planned"
+
+
+def test_structured_paragraph_points_keep_evidence_without_blocking_planning():
+    point = {"purpose": "Compare two routes", "paper_ids": ["P1"],
+             "key_evidence": "Reported 91% yield", "next": "Explain the scope boundary"}
+    planned = {**proposal(), "paragraph_tasks": [point]}
+    result = enhance_blueprint(prepared(), model_call=lambda *a, **k: planned,
+                               checkpoint={}, report=lambda *a: None)
+    section = result["section_blueprint"]["sections"][0]
+    assert section["planning_status"] == "planned"
+    assert len(section["paragraph_tasks"]) == 1
+    assert "P1" in section["paragraph_tasks"][0]
+    assert "Reported 91% yield" in section["paragraph_tasks"][0]
 
 
 
@@ -173,6 +270,10 @@ def test_one_provisional_call_and_reuse_without_audit_or_repair():
     original = deepcopy(data)
     def model(prompt, *, label):
         calls.append(label)
+        assert "key evidence" in prompt
+        assert "array of concise STRINGS" in prompt
+        assert prompt.endswith("Do not include reasoning or a prose draft outside the JSON.")
+        assert "no fixed sequence is required" in prompt
         return proposal()
     for _ in range(2):
         result = enhance_blueprint(data, model_call=model, checkpoint=checkpoint, report=lambda *a: None)
@@ -217,6 +318,121 @@ def test_global_structure_is_planned_once_before_section_requests_and_cached():
     assert calls == ["blueprint-structure", "blueprint-plan-S01"]
 
 
+def test_unassigned_body_range_is_reported_as_a_scope_gap_not_an_empty_chapter():
+    data, checkpoint, calls, progress = prepared(), {}, [], []
+    data["matrix_snapshot"] = {"rows": [{"paper_id": "P1", "title": "A selected study"}]}
+    data["section_blueprint"]["sections"].append({
+        "section_id": "S02", "section_role": "body", "title": "Conjugated enynes",
+        "primary_papers": [], "supporting_papers": [], "context_papers": [],
+    })
+
+    def model(_prompt, *, label):
+        calls.append(label)
+        if label == "blueprint-structure":
+            return {"sections": [
+                {"section_id": "S01", "title": "Supported category", "section_role": "body",
+                 "review_problem": "What does the selected study establish?", "primary_papers": ["P1"],
+                 "supporting_papers": []},
+                {"section_id": "S02", "title": "Conjugated enynes", "section_role": "body",
+                 "review_problem": "What does the corpus establish about enynes?", "primary_papers": [],
+                 "supporting_papers": []},
+            ], "unused_papers": []}
+        return proposal()
+
+    result = enhance_blueprint(data, model_call=model, checkpoint=checkpoint,
+                               report=lambda current, total, _state: progress.append((current, total)))
+    blueprint = result["section_blueprint"]
+    assert calls == ["blueprint-structure", "blueprint-plan-S01"]
+    assert [section["section_id"] for section in blueprint["sections"]] == ["S01"]
+    assert blueprint["scope_coverage_gaps"] == [{
+        "section_id": "S02", "title": "Conjugated enynes", "section_role": "body",
+        "reason_code": "no_selected_supporting_papers",
+        "reason": "The selected papers do not currently provide direct support for this range.",
+        "outline_position": 2,
+    }]
+    assert blueprint["academic_planning"]["execution_status"] == "completed"
+    assert blueprint["academic_planning"]["status"] == "completed"
+    assert blueprint["academic_planning"]["content_status"] == "partial"
+    assert blueprint["academic_planning"]["incomplete_sections"] == []
+    assert blueprint["academic_planning"]["unsupported_sections"] == ["S02"]
+    assert progress[-1] == (2, 2)
+
+
+def test_adding_supporting_paper_restores_a_previously_uncovered_range():
+    data, checkpoint, calls = prepared(), {}, []
+    data["matrix_snapshot"] = {"rows": [{"paper_id": "P1", "title": "A selected study"}]}
+    data["section_blueprint"]["sections"].append({
+        "section_id": "S02", "section_role": "body", "title": "Conjugated enynes",
+        "primary_papers": [], "supporting_papers": [], "context_papers": [],
+    })
+
+    def initial_model(_prompt, *, label):
+        calls.append(label)
+        if label == "blueprint-structure":
+            return {"sections": [
+                {"section_id": "S01", "title": "Supported category", "section_role": "body",
+                 "review_problem": "What does the selected study establish?", "primary_papers": ["P1"]},
+                {"section_id": "S02", "title": "Conjugated enynes", "section_role": "body",
+                 "review_problem": "What is established about enynes?", "primary_papers": []},
+            ], "unused_papers": []}
+        return proposal()
+
+    first = enhance_blueprint(data, model_call=initial_model, checkpoint=checkpoint, report=lambda *a: None)
+    assert [gap["section_id"] for gap in first["section_blueprint"]["scope_coverage_gaps"]] == ["S02"]
+
+    expanded = deepcopy(data)
+    expanded["matrix_snapshot"]["rows"].append({"paper_id": "P2", "title": "An enyne study"})
+    calls.clear()
+
+    def expanded_model(_prompt, *, label):
+        calls.append(label)
+        if label == "blueprint-structure":
+            return {"sections": [
+                {"section_id": "S01", "title": "Supported category", "section_role": "body",
+                 "review_problem": "What does the selected study establish?", "primary_papers": ["P1"]},
+                {"section_id": "S02", "title": "Conjugated enynes", "section_role": "body",
+                 "review_problem": "What is established about enynes?", "primary_papers": ["P2"]},
+            ], "unused_papers": []}
+        return proposal()
+
+    second = enhance_blueprint(expanded, model_call=expanded_model, checkpoint=checkpoint, report=lambda *a: None)
+    blueprint = second["section_blueprint"]
+    assert blueprint["scope_coverage_gaps"] == []
+    assert [section["section_id"] for section in blueprint["sections"]] == ["S01", "S02"]
+    assert "P2" in blueprint["sections"][1]["primary_papers"]
+    assert calls == ["blueprint-structure", "blueprint-plan-S02"]
+
+
+def test_changed_topic_with_same_section_id_does_not_retain_previous_plan_after_failure():
+    data, checkpoint, calls = prepared(), {}, []
+    data["section_blueprint"]["sections"].append({
+        "section_id": "S02", "section_role": "body", "title": "Stable category", "primary_papers": ["P2"]
+    })
+    old_result = enhance_blueprint(
+        data, model_call=lambda *a, **k: proposal(), checkpoint=checkpoint, report=lambda *a: None
+    )
+    changed = deepcopy(old_result)
+    section = next(s for s in changed["section_blueprint"]["sections"] if s["section_id"] == "S01")
+    section.update(title="Conjugated enynes", review_problem="What do enynes establish?", primary_papers=["P2"])
+
+    def unavailable(_prompt, *, label):
+        calls.append(label)
+        raise RuntimeError("provider unavailable")
+
+    result = enhance_blueprint(changed, model_call=unavailable, checkpoint=checkpoint, report=lambda *a: None)
+    current = next(s for s in result["section_blueprint"]["sections"] if s["section_id"] == "S01")
+    assert calls == ["blueprint-plan-S01"]
+    assert current["section_id"] == "S01" and current["title"] == "Conjugated enynes"
+    assert current["planning_status"] == "incomplete"
+    assert current["generation_eligible"] is False
+    assert current.get("section_thesis") != proposal()["purpose"]
+    assert current.get("writing_objective") != proposal()["purpose"]
+    assert current.get("organizing_thread") != proposal()["purpose"]
+    assert current.get("scientific_thesis", {}).get("text") != proposal()["purpose"]
+    assert current.get("paragraph_tasks", []) == []
+    assert current.get("paper_roles", []) == []
+
+
 def test_interruption_before_structure_completion_does_not_erase_section_checkpoints():
     data, checkpoint = prepared(), {}
     enhance_blueprint(data, model_call=lambda *a, **k: proposal(), checkpoint=checkpoint, report=lambda *a: None)
@@ -249,6 +465,7 @@ def test_evidence_gaps_and_unverified_thesis_never_block_planning(facts, patch):
 
 def test_concurrency_is_bounded_and_checkpointing_preserves_outline_order():
     data, checkpoint = prepared(), {}
+    data["academic_planning_limits"] = {"section_concurrency": 2}
     data["section_blueprint"]["sections"] = [
         {**data["section_blueprint"]["sections"][0], "section_id": f"S{i:02d}"} for i in range(1, 5)]
     barrier, lock = Barrier(2), Lock()

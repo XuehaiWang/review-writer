@@ -58,7 +58,7 @@ def download_access_summary(status: str, entry: dict[str, Any]) -> dict[str, str
     if status in {"queued", "running", "waiting"}:
         return {"state": "acquiring", "reason": ""}
     outcome = entry.get("status")
-    if outcome in {"downloaded", "already_in_library", "duplicate_file"}:
+    if outcome in {"downloaded", "already_in_library", "duplicate_file", "duplicate_publication"}:
         return {"state": "downloaded", "reason": ""}
     if status in {"cancelled", "interrupted"}:
         return {"state": "not_acquired", "reason": "interrupted"}
@@ -767,15 +767,12 @@ class DiscoveryService(OwnedProjectService):
                 and str((query_by_id.get(str(query_id)) or {}).get("kind") or "")
                 != "topic_partition"
             )
-            deterministic_recommended = any(
-                str(candidate.get("role") or "")
-                in {"core_candidate", "supporting_candidate"}
-                for candidate in rows
-            )
+            # Screening roles set by hand never reach the Matrix and are not
+            # formal classification. Recommend from retrieval evidence only, so
+            # screening stays a plain include/exclude decision.
             recommendation = (
                 "recommended"
-                if paper_id in metadata_rank
-                and (deterministic_recommended or strong_query)
+                if strong_query
                 else "review"
             )
             for row in rows:
@@ -869,28 +866,105 @@ class DiscoveryService(OwnedProjectService):
         }
         return review
 
-    def refresh_external_candidate(
+    def _mark_acquired_candidate(
+        self,
+        changed: dict[str, Any],
+        paper: LibraryPaper,
+        wanted_candidate_id: str,
+        paper_doi: str,
+        paper_title: str,
+    ) -> bool:
+        """Move one acquired candidate to its Library row. False when absent."""
+
+        found = False
+        for group in changed.get("results") or []:
+            if not isinstance(group, dict):
+                continue
+            retained: list[dict[str, Any]] = []
+            matched_external: list[dict[str, Any]] = []
+            for row in group.get("web_results") or []:
+                if not isinstance(row, dict):
+                    continue
+                same = bool(
+                    wanted_candidate_id
+                    and _candidate_id(row, external=True) == wanted_candidate_id
+                )
+                if not same and paper_doi:
+                    same = normalize_doi(row.get("doi")) == paper_doi
+                if not same and len(paper_title) >= 20:
+                    same = normalize_title(row.get("title")) == paper_title
+                if same:
+                    found = True
+                    matched_external.append(row)
+                else:
+                    retained.append(row)
+            if not matched_external:
+                continue
+            group["web_results"] = retained
+            local_rows = [
+                row
+                for row in group.get("local_results") or []
+                if isinstance(row, dict)
+                and _candidate_id(row, external=False) == paper.paper_id
+            ]
+            if not local_rows:
+                local = self._local_candidate_from_catalog(
+                    paper,
+                    reason="Downloaded external candidate was parsed and indexed in Library",
+                )
+                group.setdefault("local_results", []).append(local)
+                local_rows = [local]
+            for local in local_rows:
+                local["selected_for_matrix"] = False
+                local["access_status"] = "downloaded_to_library"
+                local["acquired_from_candidate_id"] = wanted_candidate_id
+                local["external_sources"] = list(
+                    dict.fromkeys(
+                        str(value)
+                        for external in matched_external
+                        for value in (
+                            external.get("sources")
+                            if isinstance(external.get("sources"), list)
+                            else [external.get("source")]
+                        )
+                        if str(value).strip()
+                    )
+                )
+            # Persist the access hint on the review itself, so a page load
+            # does not rebuild it from historical download jobs.
+            for external in matched_external:
+                external["fulltext_access"] = {"state": "downloaded", "reason": ""}
+        return found
+
+    def refresh_acquired_candidates(
         self,
         principal: Principal,
         project_id: str,
+        acquisitions: list[tuple[str, str]],
         *,
-        candidate_id: str,
-        paper_id: str,
         source_revision: int | None = None,
     ) -> dict[str, Any]:
-        """Publish a reviewable Discovery revision after acquisition/indexing."""
+        """Publish one Discovery revision for a whole acquisition batch.
+
+        Downloading N candidates used to republish the entire review N times,
+        each with its own read-modify-write retry. One revision keeps the same
+        reviewable result without the write amplification.
+        """
 
         self._owned_project(principal, project_id)
         catalog = self._active_library_catalog(principal)
-        paper = catalog.get(str(paper_id or "").strip())
-        if paper is None:
-            raise WorkflowNotFound("Downloaded Library paper not found.")
-        wanted_candidate_id = str(candidate_id or "").strip()
-        paper_doi = normalize_doi(self._paper_metadata_value(paper, "doi", ""))
-        paper_title = normalize_title(
-            self._paper_metadata_value(paper, "title", paper.title)
-        )
-
+        wanted: list[tuple[str, LibraryPaper]] = []
+        skipped: list[str] = []
+        for raw_candidate_id, raw_paper_id in acquisitions:
+            candidate_id = str(raw_candidate_id or "").strip()
+            paper = catalog.get(str(raw_paper_id or "").strip())
+            if not candidate_id or paper is None:
+                skipped.append(candidate_id or str(raw_paper_id or ""))
+                continue
+            wanted.append((candidate_id, paper))
+        if not wanted:
+            return {"status": "no_change", "project_id": project_id,
+                    "refreshed": [], "skipped": skipped, "matrix_modified": False}
         for attempt in range(2):
             current, artifact = self._read_current(
                 principal, project_id, DISCOVERY_LOGICAL_NAME
@@ -899,74 +973,32 @@ class DiscoveryService(OwnedProjectService):
                 principal.user_id, project_id, "discovery"
             )
             revision = state.revision if state else 0
-            found = False
             changed = deepcopy(current)
-            for group in changed.get("results") or []:
-                if not isinstance(group, dict):
-                    continue
-                retained: list[dict[str, Any]] = []
-                matched_external: list[dict[str, Any]] = []
-                for row in group.get("web_results") or []:
-                    if not isinstance(row, dict):
-                        continue
-                    same = bool(
-                        wanted_candidate_id
-                        and _candidate_id(row, external=True) == wanted_candidate_id
-                    )
-                    if not same and paper_doi:
-                        same = normalize_doi(row.get("doi")) == paper_doi
-                    if not same and len(paper_title) >= 20:
-                        same = normalize_title(row.get("title")) == paper_title
-                    if same:
-                        found = True
-                        matched_external.append(row)
-                    else:
-                        retained.append(row)
-                if not matched_external:
-                    continue
-                group["web_results"] = retained
-                local_rows = [
-                    row
-                    for row in group.get("local_results") or []
-                    if isinstance(row, dict)
-                    and _candidate_id(row, external=False) == paper.paper_id
-                ]
-                if not local_rows:
-                    local = self._local_candidate_from_catalog(
-                        paper,
-                        reason="Downloaded external candidate was parsed and indexed in Library",
-                    )
-                    group.setdefault("local_results", []).append(local)
-                    local_rows = [local]
-                for local in local_rows:
-                    local["selected_for_matrix"] = False
-                    local["access_status"] = "downloaded_to_library"
-                    local["acquired_from_candidate_id"] = wanted_candidate_id
-                    local["external_sources"] = list(
-                        dict.fromkeys(
-                            str(value)
-                            for external in matched_external
-                            for value in (
-                                external.get("sources")
-                                if isinstance(external.get("sources"), list)
-                                else [external.get("source")]
-                            )
-                            if str(value).strip()
-                        )
-                    )
-            if not found:
+            refreshed: list[str] = []
+            unresolved: list[str] = list(skipped)
+            for candidate_id, paper in wanted:
+                applied = self._mark_acquired_candidate(
+                    changed,
+                    paper,
+                    candidate_id,
+                    normalize_doi(self._paper_metadata_value(paper, "doi", "")),
+                    normalize_title(self._paper_metadata_value(paper, "title", paper.title)),
+                )
+                (refreshed if applied else unresolved).append(candidate_id)
+            if not refreshed:
                 return {
                     "status": "no_change",
-                    "reason": "The current Discovery revision no longer contains this external candidate.",
+                    "reason": "The current Discovery revision no longer contains these external candidates.",
                     "project_id": project_id,
-                    "paper_id": paper.paper_id,
+                    "refreshed": [],
+                    "skipped": unresolved,
                     "current_revision": revision,
                     "source_revision": source_revision,
                 }
             changed["candidate_refresh"] = {
-                "schema_version": 1,
-                "candidate_id": wanted_candidate_id,
-                "paper_id": paper.paper_id,
+                "schema_version": 2,
+                "candidate_ids": list(refreshed),
+                "paper_ids": [paper.paper_id for _candidate, paper in wanted],
                 "source_revision": source_revision,
                 "source_artifact_id": artifact.id,
                 "refreshed_at": utc_now().isoformat(),
@@ -982,20 +1014,47 @@ class DiscoveryService(OwnedProjectService):
                     expected_revision=revision,
                     status_value="review",
                 )
-                return {
-                    "status": "refreshed",
-                    "project_id": project_id,
-                    "paper_id": paper.paper_id,
-                    "candidate_id": wanted_candidate_id,
-                    "revision": published["revision"],
-                    "artifact_id": published["artifact_id"],
-                    "matrix_modified": False,
-                }
             except WorkflowConflict:
                 if attempt == 0:
                     continue
                 raise
+            return {
+                "status": "refreshed",
+                "project_id": project_id,
+                "refreshed": refreshed,
+                "skipped": unresolved,
+                "revision": published["revision"],
+                "artifact_id": published["artifact_id"],
+                "matrix_modified": False,
+            }
         raise WorkflowConflict("Discovery candidate refresh conflicted repeatedly.")
+
+    def refresh_external_candidate(
+        self,
+        principal: Principal,
+        project_id: str,
+        *,
+        candidate_id: str,
+        paper_id: str,
+        source_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Publish a reviewable Discovery revision for one candidate."""
+
+        result = self.refresh_acquired_candidates(
+            principal,
+            project_id,
+            [(candidate_id, paper_id)],
+            source_revision=source_revision,
+        )
+        return {
+            "status": result["status"],
+            "project_id": project_id,
+            "paper_id": str(paper_id or ""),
+            "candidate_id": str(candidate_id or ""),
+            "revision": result.get("revision", result.get("current_revision", 0)),
+            "artifact_id": result.get("artifact_id", ""),
+            "matrix_modified": False,
+        }
 
     def _write_json_artifact(
         self,
@@ -1069,16 +1128,68 @@ class DiscoveryService(OwnedProjectService):
             )
         return payload, artifact
 
-    def check_fulltext(self, principal: Principal, project_id: str, candidate_id: str) -> dict[str, Any]:
-        from review_writer_api.fulltext_probe import cached_check
+    def _owned_external_candidates(
+        self, principal: Principal, project_id: str, candidate_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve server-owned external candidates; never trust a client URL."""
 
-        # Resolve only server-owned candidates; never accept a client-supplied URL.
+        wanted = list(dict.fromkeys(
+            str(item or "").strip() for item in candidate_ids if str(item or "").strip()
+        ))
+        if not wanted:
+            return {}
         payload, _ = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
+        by_id: dict[str, dict[str, Any]] = {}
         for group in payload.get("results") or []:
             for row in group.get("web_results") or []:
-                if _candidate_id(row, external=True) == candidate_id:
-                    return cached_check(row)
-        raise WorkflowNotFound("Discovery candidate not found.")
+                candidate_id = _candidate_id(row, external=True)
+                if candidate_id in wanted and candidate_id not in by_id:
+                    by_id[candidate_id] = row
+        return by_id
+
+    def check_fulltext(self, principal: Principal, project_id: str, candidate_id: str) -> dict[str, Any]:
+        checks = self.check_fulltext_many(principal, project_id, [candidate_id])
+        wanted = str(candidate_id or "").strip()
+        if wanted not in checks:
+            raise WorkflowNotFound("Discovery candidate not found.")
+        return checks[wanted]
+
+    def check_fulltext_many(
+        self, principal: Principal, project_id: str, candidate_ids: list[str]
+    ) -> dict[str, Any]:
+        """Probe open-PDF availability for several candidates in one pass.
+
+        The probe pool already caches per candidate and bounds concurrency, so a
+        page of external candidates costs one request instead of one per row.
+        """
+
+        from review_writer_api.fulltext_probe import cached_check_many
+
+        rows = self._owned_external_candidates(principal, project_id, candidate_ids)
+        return cached_check_many(rows) if rows else {}
+
+    def download_candidate(
+        self, principal: Principal, project_id: str, candidate_id: str, revision: int
+    ) -> dict[str, Any]:
+        """Resolve an acquisition request against the current, owned review."""
+        payload, _ = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
+        state = self.repository.get_stage_state(principal.user_id, project_id, "discovery")
+        if state is None or state.revision != revision:
+            raise WorkflowConflict("Search results changed. Refresh before downloading this paper.")
+        for group in payload.get("results") or []:
+            if not isinstance(group, dict):
+                continue
+            for row in group.get("web_results") or []:
+                if not isinstance(row, dict) or _candidate_id(row, external=True) != candidate_id:
+                    continue
+                if not (row.get("doi") or (row.get("crossref_pdf_url") and row.get("license_urls"))):
+                    raise WorkflowValidationError(
+                        "This result has no downloadable source. Open the article or upload a PDF."
+                    )
+                candidate = deepcopy(row)
+                candidate["selected_for_matrix"] = False
+                return candidate
+        raise WorkflowNotFound("Discovery candidate not found in the current results.")
 
     def get(self, principal: Principal, project_id: str) -> dict[str, Any]:
         payload, artifact = self._read_current(principal, project_id, DISCOVERY_LOGICAL_NAME)
@@ -1087,15 +1198,18 @@ class DiscoveryService(OwnedProjectService):
             principal.user_id, project_id, MATRIX_LOGICAL_NAME
         )
         review = normalize_review(payload)
-        # Read-only projection of existing durable download jobs. No new
+        # Read-only projection of Discovery's own acquisition jobs. No new
         # artifact revision, stage invalidation, or per-paper network requests.
+        # A completed acquisition already persists its access hint on the review
+        # itself, so only a short recent window is needed to show in-flight work
+        # and the latest failures.
         access: dict[str, dict[str, str]] = {}
         with database_session(self.repository.session_factory) as session:
             jobs = session.scalars(select(WorkflowJob).where(
                 WorkflowJob.user_id == uuid.UUID(str(principal.user_id)),
-                WorkflowJob.job_type == "library.download",
-                WorkflowJob.payload_json["acquisition_project_id"].as_string() == str(project_id),
-            ).order_by(WorkflowJob.created_at.desc()).limit(100)).all()
+                WorkflowJob.job_type == "discovery.acquire",
+                WorkflowJob.payload_json["project_id"].as_string() == str(project_id),
+            ).order_by(WorkflowJob.created_at.desc()).limit(20)).all()
             for job in jobs:
                 entries = {str(e.get("candidate_id") or ""): e
                            for e in (job.result_json or {}).get("results") or [] if isinstance(e, dict)}
@@ -1300,68 +1414,6 @@ class DiscoveryService(OwnedProjectService):
         return self._publish_review(
             principal, project_id, merged, expected_revision=int(revision)
         )
-
-    def select_one(
-        self,
-        principal: Principal,
-        project_id: str,
-        paper_id: str,
-        selected: bool,
-    ) -> dict[str, Any]:
-        current = self.get(principal, project_id)
-        found = False
-        for group in current["results"]:
-            for row in group.get("local_results") or []:
-                if _candidate_id(row, external=False) == paper_id:
-                    found = True
-                    row["selected_for_matrix"] = bool(selected)
-                    if selected and row.get("role") == "excluded":
-                        row["role"] = "uncertain"
-        if not found:
-            raise WorkflowNotFound("Discovery candidate not found.")
-        return self.save(principal, project_id, current["revision"], current["results"])
-
-    def select_top(
-        self, principal: Principal, project_id: str, count: int
-    ) -> dict[str, Any]:
-        if int(count) < 1:
-            raise WorkflowValidationError("Top-N count must be positive.")
-        current = self.get(principal, project_id)
-        ranked: dict[str, tuple[float, int]] = {}
-        order = 0
-        for group in current["results"]:
-            if group.get("keep") is False:
-                continue
-            for row in group.get("local_results") or []:
-                identity = _candidate_id(row, external=False)
-                score = float(row.get("score") or row.get("raw_score") or 0)
-                previous = ranked.get(identity)
-                if previous is None or score > previous[0]:
-                    ranked[identity] = (score, order)
-                order += 1
-        selected_ids = {
-            identity
-            for identity, _rank in sorted(
-                ranked.items(), key=lambda item: (-item[1][0], item[1][1])
-            )[: int(count)]
-        }
-        for group in current["results"]:
-            for row in group.get("local_results") or []:
-                chosen = _candidate_id(row, external=False) in selected_ids
-                row["selected_for_matrix"] = chosen
-                if chosen and row.get("role") == "excluded":
-                    row["role"] = "uncertain"
-        return self.save(principal, project_id, current["revision"], current["results"])
-
-    def clear(self, principal: Principal, project_id: str) -> dict[str, Any]:
-        current = self.get(principal, project_id)
-        for group in current["results"]:
-            for row in [
-                *(group.get("local_results") or []),
-                *(group.get("web_results") or []),
-            ]:
-                row["selected_for_matrix"] = False
-        return self.save(principal, project_id, current["revision"], current["results"])
 
     def confirm(self, principal: Principal, project_id: str, revision: int) -> dict[str, Any]:
         current = self.get(principal, project_id)

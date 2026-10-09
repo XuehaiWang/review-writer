@@ -4,18 +4,30 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { usePreferences } from "../../state/preferences";
-import { SectionsPage } from "./SectionsPage";
+import { SectionsPage, WritingPlanView } from "./SectionsPage";
 
 vi.mock("../../components/ProjectSelector", () => ({
   ProjectSelector: () => null,
   useSelectedProject: () => ({ selected: { project_id: "project-1" } }),
 }));
 
-const planningUrl = "/api/v1/projects/project-1/planning";
+const planningUrl = "/api/v1/projects/project-1/sections";
 const sectionsUrl = "/api/v1/projects/project-1/sections";
 let planning: Record<string, unknown>;
 let calls: Array<{ path: string; method: string }>;
 let client: QueryClient;
+
+it("does not label unreviewed narrative as shallow or display automatic quotas", () => {
+  usePreferences.setState({ language: "zh-CN" });
+  const view = render(<WritingPlanView paperLabels={new Map()} section={{
+    narrative_diagnostics: { status: "not_reviewed", paragraph_count: 2, target_paragraph_count: 0,
+      comparison_paragraph_count: 0, minimum_comparison_paragraphs: 0 },
+  }} />);
+  expect(screen.getByText("未单独评估文风")).toBeInTheDocument();
+  expect(screen.getByText("2 段")).toBeInTheDocument();
+  expect(screen.queryByText(/结构偏浅|2\/0/)).not.toBeInTheDocument();
+  view.unmount();
+});
 
 function renderStageFour() {
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -44,7 +56,7 @@ describe("stage 04 chapter-planning handoff", () => {
       const path = String(input);
       const method = init.method || "GET";
       calls.push({ path, method });
-      if (path === planningUrl) return Response.json(planning);
+      if (path === `${planningUrl}/planning`) return Response.json(planning);
       if (path === `${planningUrl}/blueprint/confirm` && method === "POST") {
         planning = { ...planning, blueprint_approved: true, blueprint_candidate_pending: false };
         return Response.json({ status: "approved" });
@@ -180,7 +192,7 @@ describe("stage 04 chapter-planning handoff", () => {
         planning = { ...planning, blueprint_approved: true, blueprint_candidate_pending: false };
         throw new TypeError("Connection closed after server committed");
       }
-      if (path === planningUrl) return Response.json(planning);
+      if (path === `${planningUrl}/planning`) return Response.json(planning);
       if (path === sectionsUrl) return Response.json({
         project_id: "project-1", section_tasks: [], section_files: [],
         section_drafts_md: "", section_drafting_report_md: "", papers: [], revision: 0,

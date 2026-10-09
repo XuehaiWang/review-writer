@@ -819,9 +819,10 @@ textarea { resize: vertical; }
 .discovery-search-entry textarea { width: 100%; min-height: 104px; resize: vertical; line-height: 1.55; }
 .discovery-search-entry > p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .discovery-search-entry > .button { margin-top: auto; }
-.discovery-topic-example { padding: 14px 16px; border: 1px solid #c7dcd1; border-radius: 12px; background: linear-gradient(135deg, #f1f8f4, #fffdf8); }
-.discovery-topic-example p { margin: 9px 0; color: var(--ink); font-size: 13px; line-height: 1.65; }
-.discovery-topic-example small { color: var(--muted); line-height: 1.5; }
+.discovery-topic-example { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; padding: 14px 16px; border: 1px solid #c7dcd1; border-radius: 12px; background: linear-gradient(135deg, #f1f8f4, #fffdf8); }
+.discovery-topic-example .step-label { display: block; margin: 0; }
+.discovery-topic-example p { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.discovery-topic-example small { display: block; color: var(--muted); line-height: 1.5; }
 .run-form { display: grid; grid-template-columns: minmax(220px, 1.4fr) minmax(220px, 1fr) auto auto; align-items: end; gap: 12px; }
 .run-form label { margin: 0; }
 .check-label { display: flex; align-items: center; min-height: 42px; gap: 8px; }
@@ -969,6 +970,43 @@ textarea { resize: vertical; }
 .blueprint-summary-grid h3 { margin: 0 0 7px; color: var(--green); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }
 .blueprint-summary-grid p { margin: 0; color: #3f4d45; line-height: 1.6; white-space: pre-wrap; }
 .blueprint-summary-grid strong { color: var(--green-dark); font-size: 22px; }
+.blueprint-detail-groups { margin: 0 18px 18px; display: grid; gap: 8px; }
+.blueprint-content-detail { min-width: 0; border: 1px solid #dce5df; border-radius: 11px; background: #fff; }
+.blueprint-content-detail > summary { min-height: 48px; padding: 11px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--green-dark); cursor: pointer; list-style: none; }
+.blueprint-content-detail > summary::-webkit-details-marker { display: none; }
+.blueprint-content-detail > summary::after { content: "+"; margin-left: auto; color: var(--green); font-size: 18px; line-height: 1; }
+.blueprint-content-detail[open] > summary::after { content: "−"; }
+.blueprint-content-detail > summary h3 { margin: 0; color: var(--green-dark); font-size: 12px; }
+.blueprint-content-detail > summary span { color: var(--muted); font-size: 11px; }
+.blueprint-content-detail[open] > summary { border-bottom: 1px solid #e2e9e4; background: #f7faf8; }
+.blueprint-content-detail-body { padding: 14px; display: grid; gap: 14px; color: #3f4d45; font-size: 12px; line-height: 1.6; }
+.blueprint-content-detail-body h3 { margin: 0 0 6px; color: var(--green); font-size: 10px; letter-spacing: .04em; }
+.blueprint-content-detail-body p { margin: 0; white-space: pre-wrap; }
+.blueprint-content-detail-body ul, .blueprint-content-detail-body ol { margin: 6px 0 0; padding-left: 20px; }
+.blueprint-content-detail-body li + li { margin-top: 7px; }
+.blueprint-thread { padding: 12px 14px; border-left: 3px solid var(--green); border-radius: 0 8px 8px 0; background: #f5faf7; }
+.blueprint-thread ol { color: #56665d; }
+.blueprint-thesis-grid, .blueprint-followup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.blueprint-thesis-grid section, .blueprint-followup-grid section { min-width: 0; padding: 11px 12px; border: 1px solid #e5ebe7; border-radius: 8px; background: #fcfdfc; }
+.blueprint-claims { padding-top: 12px; border-top: 1px solid #e5ebe7; }
+.blueprint-claims li strong { color: var(--green-dark); }
+.blueprint-claims li small { display: block; margin-top: 3px; color: var(--muted); }
+.blueprint-paper-role-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 !important; padding: 0 !important; list-style: none; }
+.blueprint-paper-role-list li { min-width: 0; padding: 10px 12px; border: 1px solid #e5ebe7; border-radius: 8px; background: #fcfdfc; }
+.blueprint-paper-role-list li + li { margin-top: 0 !important; }
+.blueprint-paper-role-list li > strong { display: block; overflow-wrap: anywhere; color: #34493f; }
+.blueprint-paper-role-list .blueprint-role-tag { display: inline-block; margin: 5px 0; padding: 2px 7px; border-radius: 999px; color: #38604e; background: #eaf4ee; font-size: 10px; }
+.blueprint-coverage { padding-top: 12px; border-top: 1px solid #e5ebe7; }
+.blueprint-coverage ul { padding: 0; list-style: none; }
+.blueprint-coverage li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; padding: 8px 0; border-bottom: 1px solid #edf0ed; }
+.blueprint-coverage li strong { font-size: 10px; }
+.blueprint-coverage li strong.supported { color: #347257; }
+.blueprint-coverage li strong.pending { color: #9a6a20; }
+.blueprint-coverage li small { grid-column: 1 / -1; color: var(--muted); }
+.blueprint-readiness-note { margin: 12px 18px 0; }
+.blueprint-depth-note { padding-top: 10px; border-top: 1px solid #e5ebe7; color: var(--muted); font-size: 11px; }
+.blueprint-planning-notes { display: grid; gap: 6px; }
+.blueprint-planning-notes .message { margin: 0; }
 .blueprint-detail-head { min-height: 82px; }
 .blueprint-health-row { margin: 14px 18px 0; padding: 9px 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; border: 1px solid #d4e2db; border-radius: 11px; background: #f7fbf9; }
 .blueprint-health-status { display: inline-flex; align-items: center; gap: 7px; color: var(--green-dark); font-size: 12px; font-weight: 800; white-space: nowrap; }
@@ -1882,9 +1920,13 @@ textarea { resize: vertical; }
 
 @media (max-width: 640px) {
   .blueprint-summary-grid { grid-template-columns: 1fr; }
+  .blueprint-thesis-grid, .blueprint-followup-grid, .blueprint-paper-role-list { grid-template-columns: 1fr; }
+  .blueprint-detail-groups { margin-right: 12px; margin-left: 12px; }
+  .blueprint-content-detail > summary { flex-wrap: wrap; }
   .advanced-action-grid { align-items: stretch; flex-direction: column; }
   .advanced-action-grid > * { width: 100%; }
   .compact-advanced-menu > div { position: fixed; top: auto; right: 14px; bottom: 14px; left: 14px; }
+  .library-import-menu { position: fixed; top: auto; right: 14px; bottom: 14px; left: 14px; width: auto; max-height: min(80vh, 720px); overflow: auto; }
 }
 .section-checkpoint-prose {
   max-height: 32rem;
@@ -1930,7 +1972,10 @@ textarea { resize: vertical; }
 .chapter-chat-body { flex: 1; min-height: 100px; position: relative; display: flex; flex-direction: column; }
 .chapter-chat-messages { overflow: auto; overscroll-behavior: contain; min-height: 0; flex: 1; padding: 24px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; background: linear-gradient(180deg, #fafbf9, var(--green-pale)); }
 .chapter-chat-empty { margin: 10% auto; max-width: 430px; text-align: center; color: var(--muted); padding: 24px; line-height: 1.8; }
-.chapter-chat-empty::before { content: "✦"; display: grid; place-items: center; width: 52px; height: 52px; margin: 0 auto 18px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--surface); color: var(--green); font-size: 24px; box-shadow: var(--shadow-soft); }
+/* One centred glyph in a fixed badge: ``line-height: 1`` keeps the font's
+   ascent/descent out of the line box, which otherwise pushes the star below the
+   badge centre (the CJK fallback fonts have a deep descent). */
+.chapter-chat-empty::before { content: "✦"; display: flex; align-items: center; justify-content: center; line-height: 1; width: 52px; height: 52px; margin: 0 auto 18px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--surface); color: var(--green); font-size: 24px; box-shadow: var(--shadow-soft); }
 .chapter-chat-empty h3 { color: var(--green-dark); font-size: 20px; font-weight: 650; margin-bottom: 8px; }
 .chapter-chat-empty p { font-size: 13px; }
 .chapter-chat-turn { margin: 0 auto 30px; max-width: 900px; }
@@ -2144,19 +2189,22 @@ details.chat-evidence { display: block; }
 .final-figure-comparison img { width: 100%; height: 260px; object-fit: contain; background: white; border: 1px solid #d7e3de; border-radius: 10px; }
 .final-figure-review .final-bibliography-fields > label:first-child { grid-column: 1 / -1; }
 @media (max-width: 700px) { .final-figure-comparison { grid-template-columns: 1fr; } }
-.admin-concurrency-panel { padding: 1.25rem; margin-bottom: 1rem; }
+.admin-runtime-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 29rem), 1fr)); gap: 18px; align-items: start; }
+.admin-runtime-grid > .surface { min-width: 0; padding: 1.25rem; }
+.admin-runtime-grid .section-heading { margin-bottom: 1rem; }
+.admin-runtime-grid .section-heading .muted { margin-bottom: 0; }
 .admin-concurrency-grid { display: grid; gap: .7rem; }
-.admin-concurrency-row { display: grid; grid-template-columns: minmax(8rem, 1fr) repeat(2, minmax(9rem, 12rem)); align-items: end; gap: 1rem; padding: .85rem 1rem; border: 1px solid var(--border, #dbe6e1); border-radius: .8rem; }
+.admin-concurrency-row { display: grid; grid-template-columns: minmax(0, .8fr) repeat(2, minmax(0, 1fr)); align-items: center; gap: .75rem; padding: .85rem 1rem; border: 1px solid var(--border, #dbe6e1); border-radius: .8rem; }
 .admin-concurrency-row label { display: grid; gap: .35rem; font-size: .85rem; }
-.admin-concurrency-row input { width: 100%; }
+.admin-concurrency-row input { width: 100%; min-width: 0; }
 .admin-concurrency-actions { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-top: 1rem; }
 @media (max-width: 680px) { .admin-concurrency-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-concurrency-row strong { grid-column: 1 / -1; } }
-.admin-workers-panel { padding: 1.25rem; margin-bottom: 1rem; }
 .admin-worker-queues { display: grid; gap: .6rem; margin: 1rem 0; }
-.admin-worker-queue { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(11rem, 1fr) auto; align-items: center; gap: .8rem; padding: .75rem 1rem; border: 1px solid var(--border, #dbe6e1); border-radius: .8rem; }
+.admin-worker-queue { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .25rem .8rem; padding: .75rem 1rem; border: 1px solid var(--border, #dbe6e1); border-radius: .8rem; }
+.admin-worker-queue > span { grid-column: 1; font-size: .85rem; color: var(--muted); overflow-wrap: anywhere; }
+.admin-worker-queue > button { grid-column: 2; grid-row: 1 / 3; }
 .admin-worker-instances { display: grid; gap: .4rem; margin-top: .7rem; }
 .admin-worker-instances > div { display: flex; gap: 1rem; flex-wrap: wrap; padding: .5rem; }
-@media (max-width: 680px) { .admin-worker-queue { grid-template-columns: 1fr auto; } .admin-worker-queue span { grid-column: 1; } .admin-worker-queue button { grid-column: 2; grid-row: 1 / 3; } }
 /* Manuscript editing remains part of the reading surface, not a nested form. */
 .draft-inline-text { outline: none; border-radius: 6px; min-height: 1.6em; cursor: text; }
 .draft-inline-text:focus { box-shadow: 0 0 0 2px var(--accent, #17645b); background: #f6faf8; }

@@ -1,6 +1,8 @@
 import type { Job } from "../../api/types";
 import { useUiText } from "../../i18n/useUiText";
 import { buildPaperDisplayLabels } from "../../utils/paperLabels";
+import { analysisState } from "./MatrixAnalysisStatus";
+import { readingCompleted, type FactExtractionProfile, type FactProcessing, type MatrixFact } from "./matrixReading";
 
 type LiveFact = {
   fact_id: string;
@@ -15,6 +17,9 @@ type LivePaper = {
   fact_count: number;
   pending_fact_count?: number;
   verified_fact_count?: number;
+  processing?: FactProcessing;
+  fact_extraction_profile?: FactExtractionProfile;
+  pending_revision_fact_ids?: string[];
   classification_count: number;
   automatic_resolution_status: string;
   facts_preview: LiveFact[];
@@ -73,6 +78,9 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
           fact_count: number(item.fact_count),
           pending_fact_count: number(item.pending_fact_count),
           verified_fact_count: number(item.verified_fact_count),
+          processing: (record(item.processing) as FactProcessing | null) || undefined,
+          fact_extraction_profile: (record(item.fact_extraction_profile) as FactExtractionProfile | null) || undefined,
+          pending_revision_fact_ids: strings(item.pending_revision_fact_ids),
           classification_count: number(item.classification_count),
           automatic_resolution_status: String(item.automatic_resolution_status || ""),
           facts_preview: previews.flatMap((rawFact) => {
@@ -108,6 +116,11 @@ export function readMatrixEnrichmentLive(job: Job): MatrixEnrichmentLive | null 
       fact_count: facts.length,
       pending_fact_count: number(result.pending_fact_count),
       verified_fact_count: number(result.verified_fact_count),
+      processing: (record(result.processing) as FactProcessing | null) || undefined,
+      fact_extraction_profile: (record(result.fact_extraction_profile) as FactExtractionProfile | null) || undefined,
+      pending_revision_fact_ids: (facts as MatrixFact[]).filter(fact => fact.revision_of_fact_id
+        && !fact.superseded_by_fact_id && !["supported", "uncertain", "rejected"].includes(fact.verification?.status || ""))
+        .map(fact => fact.fact_id || fact.revision_of_fact_id || ""),
       classification_count: Object.values(tags).reduce<number>((sum, value) => sum + (Array.isArray(value) ? value.length : 0), 0),
       automatic_resolution_status: String(record(result.automatic_resolution)?.status || ""),
       facts_preview: facts.slice(0, 3).flatMap((rawFact): LiveFact[] => {
@@ -151,16 +164,16 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
   const phaseLabel = job.status === "queued" && job.queue_reason === "model_waiting"
     ? text("正在等待模型返回事实结果，已释放提取资源", "Waiting for the model result; extraction capacity is free")
     : activeIds.length > 1
-    ? text(`正在并行提取与核验 ${activeIds.length} 篇论文`, `Extracting and verifying ${activeIds.length} papers in parallel`)
+    ? text(`正在并行分析 ${activeIds.length} 篇论文`, `Analyzing ${activeIds.length} papers in parallel`)
     : ({
-    extracting: text("提取与核对原文事实", "Extracting and checking source facts"),
+    extracting: text("正在阅读论文并整理发现", "Reading papers and organizing findings"),
     classification_refresh: text("复用已有事实，更新论文分类", "Reusing verified facts to update paper routes"),
     targeted_recheck: text("正在自动补证分类边界", "Automatically rechecking classification evidence"),
     routing_adjudication: text("正在核对论文分类", "Checking paper classification"),
-    verifying: text("正在核验事实与原文的对应关系", "Verifying facts against their sources"),
+    verifying: text("正在核验本次使用的科学关系", "Checking scientific relationships needed for this use"),
     verified: text("事实核验已完成", "Fact verification completed"),
     retrieving: text("正在查找缺失事实的原文依据", "Retrieving source evidence for fact gaps"),
-    supplementing: text("正在补充缺失事实", "Extracting missing facts"),
+    supplementing: text("正在补充本节需要的证据", "Gathering evidence needed for this section"),
     restoring: text("正在恢复已有检查点", "Restoring an existing checkpoint"),
     finalizing: text("正在汇总并写入 Matrix", "Finalizing and publishing to the Matrix"),
   } as Record<string, string>)[live?.phase || "extracting"] || text("正在处理", "Processing");
@@ -186,13 +199,17 @@ export function MatrixLiveProgress({ job, papers }: { job: Job; papers: MatrixPa
       {items.length ? <div className="matrix-live-results">
         {items.map((item) => {
           const paper = papersById.get(item.paper_id);
+          const state = analysisState({ paper_id: item.paper_id, fact_enrichment: item });
+          const read = readingCompleted({ fact_enrichment: item }) && ["complete", "limited"].includes(state);
           return <article key={item.paper_id}>
             <div className="matrix-live-result-head">
               <strong>{paperLabels.get(item.paper_id) || item.paper_id}{paper ? ` · ${titleText(paper.title)}` : ""}</strong>
-              <span className={item.status === "failed" ? "failed" : "complete"}>{item.pending_fact_count ? text("待核验", "Verification pending") : item.status === "failed" ? text("处理失败", "Processing failed") : text("处理完成", "Processing completed")}</span>
+              <span className={state === "failed" ? "failed" : "complete"}>{state === "failed" ? text("处理失败", "Processing failed") : read ? text("已阅读", "Read") : item.pending_fact_count ? text("待核验", "Verification pending") : text("处理完成", "Processing completed")}</span>
             </div>
             <small>{text(`已提取 ${item.fact_count} 条事实 · ${item.classification_count} 个正式分类`, `${item.fact_count} facts · ${item.classification_count} formal classifications`)}</small>
-            {item.pending_fact_count ? <small>{text(`还有 ${item.pending_fact_count} 条事实待核验，继续处理会复用已完成的事实。`, `${item.pending_fact_count} facts await verification; continuing reuses completed work.`)}</small> : null}
+            {item.pending_fact_count ? <small>{read
+              ? text(`${item.pending_fact_count} 条初读发现尚未核验，将在实际使用时核对原文。`, `${item.pending_fact_count} first-reading findings are unverified; they will be checked against sources when used.`)
+              : text(`还有 ${item.pending_fact_count} 条事实待核验，继续处理会复用已完成的事实。`, `${item.pending_fact_count} facts await verification; continuing reuses completed work.`)}</small> : null}
             {item.facts_preview.length ? <ul>{item.facts_preview.map((fact, index) => <li key={fact.fact_id || `${item.paper_id}-${index}`}><b>{fact.field_id.replaceAll("_", " ")}</b><span>{fact.value}</span></li>)}</ul> : null}
           </article>;
         })}

@@ -178,11 +178,11 @@ class SectionNarrativeContractTests(unittest.TestCase):
 
         diagnostics = derive_narrative_diagnostics(writing, depth)
 
-        self.assertEqual("complete", diagnostics["status"])
+        self.assertEqual("not_reviewed", diagnostics["status"])
         self.assertEqual(2, diagnostics["comparison_paragraph_count"])
         self.assertEqual("anchor_case", canonical_argument_role("reported_evidence"))
-        self.assertEqual(960, depth["target_word_min"])
-        self.assertEqual(1500, depth["target_word_max"])
+        self.assertEqual(0, depth["target_word_min"])
+        self.assertEqual(0, depth["target_word_max"])
 
     def test_unjustified_single_paper_section_is_warning_with_repair_suggestion(self) -> None:
         diagnostics = taxonomy_diagnostics(

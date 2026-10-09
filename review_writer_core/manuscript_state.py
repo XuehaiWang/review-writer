@@ -329,7 +329,7 @@ def build_manuscript_state(
     paths = {str(key): str(value) for key, value in (artifact_paths or {}).items()}
     lines = render_source.splitlines()
     blocks: list[dict[str, Any]] = []
-    title = "Scientific Review"
+    title = "Chemistry Review"
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     index = 0
@@ -343,7 +343,7 @@ def build_manuscript_state(
         if heading:
             level = len(heading.group(1))
             text = heading.group(2).strip()
-            if level == 1 and title == "Scientific Review":
+            if level == 1 and title == "Chemistry Review":
                 title = text
             else:
                 blocks.append({"kind": "heading", "level": level, "text": text})

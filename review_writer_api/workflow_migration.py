@@ -327,7 +327,6 @@ def _project_map(
                 topic=str(config.get("topic") or ""),
                 taxonomy_profile=str(config.get("taxonomy_profile") or "chemistry_general"),
                 status="active",
-                current_stage="discovery",
                 stage_states={},
                 created_at=_parse_datetime(row.get("created_at")),
                 updated_at=_parse_datetime(row.get("updated_at")),

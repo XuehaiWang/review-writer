@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, event, func, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import func, select
 
 from review_writer_api.database import Base, Project, User
 from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
+from review_writer_api.tests._test_support import session_factory
 from review_writer_api.workflow_models import WorkflowArtifact
 from review_writer_api.workflow_repository import WorkflowRepository
 from review_writer_api.workspaces import HostedWorkspaceManager
@@ -24,22 +22,6 @@ def artifact_service_class():
         raise AssertionError("The immutable artifact service is missing.") from exc
     return ArtifactService
 
-
-def session_factory():
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(engine, "connect")
-    def enable_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False), engine
 
 
 class ArtifactServiceTests(unittest.TestCase):

@@ -111,37 +111,18 @@ def build_library_router(
         if job_service.repository.get_owned_project(principal.user_id, normalized) is None:
             raise WorkflowNotFound("Project not found.")
         return f"project:{normalized}"
-    configured = dict(handlers or {})
 
-    def submit_discovery_refresh(
-        principal: Principal,
-        refresh: dict[str, Any],
-        paper_id: str,
-    ):
-        project_id = str(refresh.get("project_id") or "").strip()
-        candidate_id = str(refresh.get("candidate_id") or "").strip()
-        if not project_id or not candidate_id or not paper_id:
-            return None
-        try:
-            return job_service.submit(
-                principal,
-                scope="project",
-                project_id=project_id,
-                job_type="discovery.candidate-refresh",
-                idempotency_key=(
-                    f"candidate:{candidate_id}:paper:{paper_id}:"
-                    f"revision:{refresh.get('source_revision')}"
-                ),
-                payload={
-                    "project_id": project_id,
-                    "candidate_id": candidate_id,
-                    "paper_id": paper_id,
-                    "source_revision": refresh.get("source_revision"),
-                },
-                operation_key=f"candidate-refresh:{candidate_id}",
-            )
-        except WorkflowConflict:
-            return None
+    def current_acquisition_job(principal: Principal, project_id: str, job_type: str):
+        operation_key = acquisition_operation_key(principal, project_id)
+        job = job_service.repository.get_current_job(
+            principal.user_id,
+            scope="library",
+            job_type=job_type,
+            operation_key=operation_key,
+        )
+        return {"job": _job_response(job).model_dump() if job is not None else None}
+
+    configured = dict(handlers or {})
 
     def index_handler(context, payload):
         principal = Principal(context.user_id, frozenset({Role.USER}))
@@ -171,12 +152,6 @@ def build_library_router(
         )
         result["semantic"] = semantic
         context.repository.update_job_progress(context.job_id, 3, 3)
-        refresh = payload.get("discovery_refresh")
-        if isinstance(refresh, dict):
-            refresh_job = submit_discovery_refresh(principal, refresh, paper_id)
-            result["discovery_refresh_job_id"] = (
-                refresh_job.id if refresh_job is not None else None
-            )
         return result
 
     job_service.register_handler("library.index", index_handler)
@@ -220,19 +195,23 @@ def build_library_router(
         "library.semantic-backfill", semantic_backfill_handler
     )
 
-    def semantic_backfill_state(principal: Principal) -> dict[str, Any]:
-        plan = library_index_service.semantic_backfill_plan(principal)
-        if not plan.get("enabled") or plan.get("status") == "unavailable":
-            return plan
+    SEMANTIC_BACKFILL_OPERATION_KEY = "semantic-backfill"
 
-        operation_key = "semantic-backfill"
-        current = job_service.repository.get_current_job(
+    def current_semantic_backfill_job(principal: Principal):
+        return job_service.repository.get_current_job(
             principal.user_id,
             scope="library",
             project_id=None,
             job_type="library.semantic-backfill",
-            operation_key=operation_key,
+            operation_key=SEMANTIC_BACKFILL_OPERATION_KEY,
         )
+
+    def semantic_backfill_state(principal: Principal) -> dict[str, Any]:
+        """Read-only index progress. A GET must never start work."""
+        plan = library_index_service.semantic_backfill_plan(principal)
+        if not plan.get("enabled") or plan.get("status") == "unavailable":
+            return plan
+        current = current_semantic_backfill_job(principal)
         if current is not None and current.status in {
             "queued",
             "running",
@@ -243,7 +222,25 @@ def build_library_router(
                 "status": current.status,
                 "current_job": _job_response(current).model_dump(),
             }
+        return {**plan, "current_job": None}
 
+    def start_semantic_backfill(principal: Principal) -> dict[str, Any]:
+        """Commit one bounded backfill batch. Submission is an explicit write."""
+        plan = library_index_service.semantic_backfill_plan(principal)
+        if not plan.get("enabled") or plan.get("status") == "unavailable":
+            return plan
+        current = current_semantic_backfill_job(principal)
+        if current is not None and current.status in {
+            "queued",
+            "running",
+            "cancel_requested",
+        }:
+            return {
+                **plan,
+                "status": current.status,
+                "current_job": _job_response(current).model_dump(),
+            }
+        operation_key = SEMANTIC_BACKFILL_OPERATION_KEY
         paper_ids = list(plan.get("paper_ids") or [])
         if plan.get("status") != "pending" or not paper_ids:
             return {**plan, "current_job": None}
@@ -307,14 +304,11 @@ def build_library_router(
         *,
         force: bool = False,
         suppress_active_conflict: bool = False,
-        discovery_refresh: dict[str, Any] | None = None,
     ):
         if not library_index_service.enabled:
             return None
         prepared = library_index_service.prepare(principal, paper_id, force=force)
         if not prepared.needs_job:
-            if discovery_refresh:
-                submit_discovery_refresh(principal, discovery_refresh, prepared.paper_id)
             return None
         try:
             return job_service.submit(
@@ -331,18 +325,11 @@ def build_library_router(
                     "paper_id": prepared.paper_id,
                     "source_lineage_hash": prepared.source_lineage_hash,
                     "semantic_only": prepared.semantic_only,
-                    **(
-                        {"discovery_refresh": dict(discovery_refresh)}
-                        if discovery_refresh
-                        else {}
-                    ),
                 },
                 operation_key=f"index:{prepared.paper_id}",
             )
         except WorkflowConflict:
             if suppress_active_conflict:
-                if discovery_refresh:
-                    submit_discovery_refresh(principal, discovery_refresh, paper_id)
                 return None
             raise
 
@@ -391,6 +378,43 @@ def build_library_router(
                 return None
             raise
 
+    def finalize_admission(
+        principal: Principal,
+        record: LibraryPaperRecord,
+        outcome: str,
+    ) -> dict[str, Any]:
+        index_job = enqueue_index(
+            principal, record.paper_id, suppress_active_conflict=True
+        )
+        bibliography_job = enqueue_bibliography_audit(
+            principal, record, suppress_active_conflict=True
+        )
+        return {
+            **_paper_payload(record),
+            "status": outcome,
+            "mineru_ready": True,
+            "library_count": library_service.count(principal),
+            "index_job_id": index_job.id if index_job is not None else None,
+            "bibliography_audit_job_id": (
+                bibliography_job.id if bibliography_job is not None else None
+            ),
+        }
+
+    async def stream_to_staging(
+        request: Request,
+        staged,
+        max_bytes: int,
+        too_large_message: str,
+    ) -> int:
+        size = 0
+        with staged.open("xb") as handle:
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise WorkflowValidationError(too_large_message)
+                handle.write(chunk)
+        return size
+
     search_handler = configured.get("library.search")
     if search_handler is not None:
         job_service.register_handler("library.search", search_handler)
@@ -401,31 +425,11 @@ def build_library_router(
             result = dict(download_handler(context, payload) or {})
             principal = Principal(context.user_id, frozenset({Role.USER}))
             records = library_service.reconcile_download_result(principal, result)
-            result_entries = {
-                str(entry.get("paper_id") or ""): entry
-                for entry in result.get("results") or []
-                if isinstance(entry, dict) and str(entry.get("paper_id") or "").strip()
-            }
-            acquisition_project_id = str(
-                payload.get("acquisition_project_id") or ""
-            ).strip()
             for record in records:
-                entry = result_entries.get(record.paper_id) or {}
-                candidate_id = str(entry.get("candidate_id") or "").strip()
-                refresh = (
-                    {
-                        "project_id": acquisition_project_id,
-                        "candidate_id": candidate_id,
-                        "source_revision": payload.get("discovery_revision"),
-                    }
-                    if acquisition_project_id and candidate_id
-                    else None
-                )
                 enqueue_index(
                     principal,
                     record.paper_id,
                     suppress_active_conflict=True,
-                    discovery_refresh=refresh,
                 )
                 enqueue_bibliography_audit(
                     principal,
@@ -451,23 +455,8 @@ def build_library_router(
             job_id=context.job_id,
         )
         staged.unlink(missing_ok=True)
-        index_job = enqueue_index(
-            principal, record.paper_id, suppress_active_conflict=True
-        )
-        bibliography_job = enqueue_bibliography_audit(
-            principal, record, suppress_active_conflict=True
-        )
         context.repository.update_job_progress(context.job_id, 3, 3)
-        return {
-            **_paper_payload(record),
-            "status": outcome,
-            "mineru_ready": True,
-            "library_count": library_service.count(principal),
-            "index_job_id": index_job.id if index_job is not None else None,
-            "bibliography_audit_job_id": (
-                bibliography_job.id if bibliography_job is not None else None
-            ),
-        }
+        return finalize_admission(principal, record, outcome)
 
     job_service.register_handler("library.upload", upload_handler)
 
@@ -483,10 +472,31 @@ def build_library_router(
         payload["batch_id"] = str((job.payload or {}).get("batch_id") or "")
         return payload
 
+    @router.get("/index-progress")
+    def index_progress(
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        """Indexing progress, separate from the paper list.
+
+        The library banner polls this while work is running. Keeping it off
+        ``/papers`` stops a three-second poll from re-planning the whole library
+        on every tick, and keeping it read-only means a poll never starts work.
+        """
+        return {"semantic_backfill": semantic_backfill_state(principal)}
+
+    @router.post("/index-progress/backfill", status_code=status.HTTP_202_ACCEPTED)
+    def start_index_backfill(
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        """Commit the pending semantic-index batch, once, without repeating a GET."""
+        return {"semantic_backfill": start_semantic_backfill(principal)}
+
     @router.get("/papers")
     def papers(
         q: str = "",
         mode: str = "metadata",
+        limit: int = 50,
+        offset: int = 0,
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         normalized_mode = str(mode or "metadata").strip().casefold()
@@ -494,24 +504,27 @@ def build_library_router(
             raise WorkflowValidationError(
                 "Library search mode must be metadata, fulltext, or hybrid."
             )
-        semantic_backfill = semantic_backfill_state(principal)
-        if not str(q or "").strip():
-            rows = library_service.list(principal)
-            search_matches: dict[str, dict[str, Any]] = {}
+        size = max(1, min(int(limit), 500))
+        start = max(0, int(offset))
+        needle = str(q or "").strip()
+        search_matches: dict[str, dict[str, Any]] = {}
+        if not needle:
+            rows, total = library_service.page(principal, "", limit=size, offset=start)
             retrieval_mode = (
                 "metadata"
                 if normalized_mode == "metadata" or not library_index_service.enabled
                 else "lexical"
             )
         elif normalized_mode == "metadata" or not library_index_service.enabled:
-            rows = library_service.list(principal, q)
-            search_matches = {}
+            rows, total = library_service.page(principal, needle, limit=size, offset=start)
             retrieval_mode = "metadata"
         else:
+            # Ranking must see every candidate, so it stays in memory; only the
+            # requested page is returned.
             all_rows = library_service.list(principal)
             by_id = {row.paper_id: row for row in all_rows}
-            lexical = library_index_service.lexical_scores(principal, q)
-            metadata_rows = library_service.list(principal, q)
+            lexical = library_index_service.lexical_scores(principal, needle)
+            metadata_rows = library_service.list(principal, needle)
             combined: dict[str, float] = {}
             if normalized_mode == "hybrid":
                 for rank, record in enumerate(metadata_rows, start=1):
@@ -521,16 +534,18 @@ def build_library_router(
                 start=1,
             ):
                 combined[paper_id] = combined.get(paper_id, 0.0) + 1 / (library_index_service.tuning.rrf_constant + rank)
-            rows = [
+            ranked = [
                 by_id[paper_id]
                 for paper_id, _score in sorted(
                     combined.items(), key=lambda item: (-item[1], item[0])
                 )
                 if paper_id in by_id
             ]
+            total = len(ranked)
+            rows = ranked[start:start + size]
             hits = library_index_service.retrieve(
                 principal,
-                q,
+                needle,
                 allowed_papers=list(by_id),
                 top_k=50,
                 include_neighbors=False,
@@ -563,10 +578,13 @@ def build_library_router(
                 for row in rows
             ],
             "count": len(rows),
+            "total": total,
+            "limit": size,
+            "offset": start,
+            "has_more": start + len(rows) < total,
             "query": q,
             "requested_mode": normalized_mode,
             "retrieval_mode": retrieval_mode,
-            "semantic_backfill": semantic_backfill,
         }
 
     @router.post("/papers")
@@ -591,12 +609,12 @@ def build_library_router(
                 await anyio.sleep(0.25)
 
         try:
-            with staged.open("xb") as handle:
-                async for chunk in request.stream():
-                    size += len(chunk)
-                    if size > library_service.MAX_PDF_BYTES:
-                        raise WorkflowValidationError("Each PDF must be 80 MB or smaller.")
-                    handle.write(chunk)
+            size = await stream_to_staging(
+                request,
+                staged,
+                library_service.MAX_PDF_BYTES,
+                "Each PDF must be 80 MB or smaller.",
+            )
             library_service.validate_staged_upload(staged, size)
             disconnect_watcher = asyncio.create_task(watch_disconnect())
             admission = partial(
@@ -609,24 +627,9 @@ def build_library_router(
             record, outcome = await anyio.to_thread.run_sync(
                 admission, abandon_on_cancel=True
             )
-            index_job = enqueue_index(
-                principal, record.paper_id, suppress_active_conflict=True
-            )
-            bibliography_job = enqueue_bibliography_audit(
-                principal, record, suppress_active_conflict=True
-            )
-            payload = {
-                **_paper_payload(record),
-                "status": outcome,
-                "mineru_ready": True,
-                "library_count": library_service.count(principal),
-                "index_job_id": index_job.id if index_job is not None else None,
-                "bibliography_audit_job_id": (
-                    bibliography_job.id if bibliography_job is not None else None
-                ),
-            }
+            payload = finalize_admission(principal, record, outcome)
             return JSONResponse(
-                status_code=(status.HTTP_200_OK if outcome == "duplicate_file" else status.HTTP_201_CREATED),
+                status_code=(status.HTTP_200_OK if outcome in {"duplicate_file", "duplicate_publication"} else status.HTTP_201_CREATED),
                 content=payload,
             )
         except MinerUPreciseParseFailed as exc:
@@ -655,12 +658,12 @@ def build_library_router(
         staged = archive_path(library_service, principal, archive_id)
         submitted, size = False, 0
         try:
-            with staged.open("xb") as handle:
-                async for chunk in request.stream():
-                    size += len(chunk)
-                    if size > MAX_ARCHIVE_BYTES:
-                        raise WorkflowValidationError("ZIP files must be 256 MB or smaller.")
-                    handle.write(chunk)
+            size = await stream_to_staging(
+                request,
+                staged,
+                MAX_ARCHIVE_BYTES,
+                "ZIP files must be 256 MB or smaller.",
+            )
             if not size:
                 raise WorkflowValidationError("The uploaded ZIP is empty.")
             job = job_service.submit(principal, scope="library", project_id=None,
@@ -696,12 +699,12 @@ def build_library_router(
         size = 0
         submitted = False
         try:
-            with staged.open("xb") as handle:
-                async for chunk in request.stream():
-                    size += len(chunk)
-                    if size > library_service.MAX_PDF_BYTES:
-                        raise WorkflowValidationError("Each PDF must be 80 MB or smaller.")
-                    handle.write(chunk)
+            size = await stream_to_staging(
+                request,
+                staged,
+                library_service.MAX_PDF_BYTES,
+                "Each PDF must be 80 MB or smaller.",
+            )
             library_service.validate_staged_upload(staged, size)
             job = job_service.submit(
                 principal,
@@ -777,29 +780,6 @@ def build_library_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return library_index_service.status(principal, paper_id)
-
-    @router.post(
-        "/papers/{paper_id}/reindex", status_code=status.HTTP_202_ACCEPTED
-    )
-    def reindex_paper(
-        paper_id: str,
-        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
-        principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        prepared = library_index_service.prepare(principal, paper_id, force=True)
-        job = job_service.submit(
-            principal,
-            scope="library",
-            project_id=None,
-            job_type="library.index",
-            idempotency_key=idempotency_key.strip() or f"manual:{uuid.uuid4()}",
-            payload={
-                "paper_id": prepared.paper_id,
-                "source_lineage_hash": prepared.source_lineage_hash,
-            },
-            operation_key=f"index:{prepared.paper_id}",
-        )
-        return _job_response(job).model_dump()
 
     @router.post("/reindex-jobs", status_code=status.HTTP_202_ACCEPTED)
     def create_reindex_jobs(
@@ -1000,10 +980,9 @@ def build_library_router(
         principal: Principal = Depends(principal_dependency),
     ):
         operation_key = acquisition_operation_key(principal, project_id)
-        payload_data = {
-            **payload.model_dump(),
-            **({"acquisition_project_id": project_id} if operation_key else {}),
-        }
+        # The operation key already scopes this acquisition to its project; the
+        # payload carries no project back-channel field for another stage.
+        payload_data = payload.model_dump()
         key = idempotency_key.strip() or str(uuid.uuid4())
         job = job_service.submit(
             principal,
@@ -1021,14 +1000,7 @@ def build_library_router(
         project_id: str = "",
         principal: Principal = Depends(principal_dependency),
     ):
-        operation_key = acquisition_operation_key(principal, project_id)
-        job = job_service.repository.get_current_job(
-            principal.user_id,
-            scope="library",
-            job_type="library.search",
-            operation_key=operation_key,
-        )
-        return {"job": _job_response(job).model_dump() if job is not None else None}
+        return current_acquisition_job(principal, project_id, "library.search")
 
     @router.post("/download-jobs", status_code=status.HTTP_202_ACCEPTED)
     def download_job(
@@ -1070,7 +1042,6 @@ def build_library_router(
         payload_data = {
             **payload.model_dump(),
             "candidates": selected_candidates,
-            **({"acquisition_project_id": project_id} if operation_key else {}),
         }
         job = job_service.submit(
             principal,
@@ -1088,13 +1059,6 @@ def build_library_router(
         project_id: str = "",
         principal: Principal = Depends(principal_dependency),
     ):
-        operation_key = acquisition_operation_key(principal, project_id)
-        job = job_service.repository.get_current_job(
-            principal.user_id,
-            scope="library",
-            job_type="library.download",
-            operation_key=operation_key,
-        )
-        return {"job": _job_response(job).model_dump() if job is not None else None}
+        return current_acquisition_job(principal, project_id, "library.download")
 
     return router

@@ -27,7 +27,7 @@ from review_writer_api.schemas import (
     ModelDelegationResponse,
 )
 from review_writer_api.server_providers import ServerProviderSettingsService
-from review_writer_api.security import Principal, Role
+from review_writer_api.security import Principal, Role, bearer_token
 
 
 class LeaseTokenRequest(BaseModel):
@@ -54,12 +54,7 @@ class EmbeddingProfileResponse(BaseModel):
 
 
 def _bearer_token(request: Request) -> str:
-    authorization = str(request.headers.get("Authorization") or "")
-    return (
-        authorization[7:].strip()
-        if authorization.casefold().startswith("bearer ")
-        else ""
-    )
+    return bearer_token(str(request.headers.get("Authorization") or ""))
 
 
 def create_gateway_app(settings: ApiSettings | None = None) -> FastAPI:

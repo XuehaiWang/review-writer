@@ -1,9 +1,30 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { MatrixAnalysisStatus, MatrixEvidenceUse, analysisFailed, analysisFailureReason, analysisState } from "./MatrixAnalysisStatus";
+import { MatrixAnalysisStatus, MatrixEvidenceUse, analysisFailed, analysisFailureReason, analysisState, unfinishedAnalysis } from "./MatrixAnalysisStatus";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it("reaches the same state from a list digest as from the full fact records", () => {
+  // The paper list omits every paper's fact records and carries only the
+  // server-derived digest, so both paths must classify a paper identically.
+  // Keep this table in step with fact_display_signals in review_writer_core.
+  const enrichment = { status: "complete", review_readiness: "complete", processing: { reading: "completed", extraction: "completed" } };
+  const cases = [
+    { name: "no findings", facts: [], digest: { has_pending_revision: false, has_limited_fact: false } },
+    { name: "verified record", facts: [{ verification: { status: "supported" } }], digest: { has_pending_revision: false, has_limited_fact: false } },
+    { name: "context-only record", facts: [{ support_level: "context_only" }], digest: { has_pending_revision: false, has_limited_fact: true } },
+    { name: "uncertain record", facts: [{ verification: { status: "uncertain" } }], digest: { has_pending_revision: false, has_limited_fact: true } },
+    { name: "rejected record", facts: [{ verification: { status: "rejected" } }], digest: { has_pending_revision: false, has_limited_fact: true } },
+    { name: "unverified revision", facts: [{ revision_of_fact_id: "old" }], digest: { has_pending_revision: true, has_limited_fact: false } },
+    { name: "superseded revision", facts: [{ revision_of_fact_id: "old", superseded_by_fact_id: "new" }], digest: { has_pending_revision: false, has_limited_fact: false } },
+  ];
+  for (const item of cases) {
+    const fromRecords = analysisState({ paper_id: item.name, scientific_facts: item.facts, fact_enrichment: enrichment });
+    const fromDigest = analysisState({ paper_id: item.name, facts_digest: item.digest, fact_enrichment: enrichment });
+    expect([item.name, fromDigest]).toEqual([item.name, fromRecords]);
+  }
+});
 
 it("keeps evidence guidance compact and separate from task feedback", () => {
   const paper = { paper_id: "P1", fact_enrichment: { status: "complete", review_readiness: "complete" } };
@@ -83,5 +104,41 @@ it("restores unpublished checkpoint before submitting new extraction", async () 
   fireEvent.click(screen.getByText("继续未完成分析（1）"));
   await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
   expect(fetch.mock.calls[0][0]).toBe("/api/v1/jobs/previous-job/retry");
+  client.clear();
+});
+
+it("treats unused first-reading candidates as complete without concealing requested revisions or failures", () => {
+  const profile = { reading_strategy: "review-oriented/1", reading_status: "completed", reading_source_key: "source-1" };
+  const read = { paper_id: "read", scientific_facts: [{ validation_contract: "fact-support/3", verification: { status: "pending" } }],
+    fact_enrichment: { status: "partial", review_readiness: "source_not_established", fact_extraction_profile: profile,
+      processing: { reading: "completed", extraction: "completed", verification: "pending", source_recovery: "not_required" } } };
+  expect(analysisState(read)).toBe("complete");
+  expect(analysisState({ ...read, scientific_facts: [] })).toBe("complete");
+  expect(analysisState({ ...read, fact_enrichment: { ...read.fact_enrichment, processing: undefined } })).toBe("complete");
+  const revision = { ...read, paper_id: "revision", scientific_facts: [{ fact_id: "new", revision_of_fact_id: "old", verification: { status: "pending" } }] };
+  expect(analysisState(revision)).toBe("pending");
+  expect(analysisState({ ...read, fact_enrichment: { ...read.fact_enrichment, pending_revision_fact_ids: ["new"] } })).toBe("pending");
+  const failed = { ...read, paper_id: "failed", fact_enrichment: { ...read.fact_enrichment, last_attempt: { status: "failed", error: "provider timed out" } } };
+  expect(analysisState(failed)).toBe("failed");
+  expect(analysisState({ ...read, fact_enrichment: { ...read.fact_enrichment,
+    fact_extraction_profile: { ...profile, stop_reason: "provider_or_budget_unavailable" } } })).toBe("failed");
+  expect(analysisState({ ...read, fact_enrichment: { ...read.fact_enrichment,
+    processing: { ...read.fact_enrichment.processing, verification: "failed" } } })).toBe("failed");
+  expect(unfinishedAnalysis([read, revision, failed]).retryable.map(paper => paper.paper_id)).toEqual(["revision", "failed"]);
+});
+
+it("does not offer a new paid request for a completed reading with pending candidates", () => {
+  const paper = { paper_id: "read", fact_enrichment: { status: "partial", review_readiness: "source_not_established",
+    processing: { reading: "completed", verification: "pending" } } };
+  const client = new QueryClient();
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  render(<QueryClientProvider client={client}>
+    <MatrixAnalysisStatus papers={[paper]} projectId="project-read" busy={false} refresh={async () => undefined} />
+    <MatrixEvidenceUse paper={paper} />
+  </QueryClientProvider>);
+  expect(screen.getByRole("button", { name: "继续未完成分析（0）" })).toBeDisabled();
+  expect(screen.getByText("初读已完成，具体判断按写作需要核验")).toBeInTheDocument();
+  expect(fetch).not.toHaveBeenCalled();
   client.clear();
 });

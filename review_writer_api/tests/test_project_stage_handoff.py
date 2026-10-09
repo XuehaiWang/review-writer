@@ -12,14 +12,23 @@ from review_writer_api.services import ProjectService
 
 
 class ProjectRecords:
-    def __init__(self, *records: ProjectRecord):
+    def __init__(self, *records: ProjectRecord, boundary=None):
         self.records = records
+        self.boundary = boundary
+        self.boundary_reads = 0
+        self.deep_checks = 0
 
     def list_for_user(self, _user_id):
         return list(self.records)
 
     def get_for_user(self, _user_id, project_id):
         return next((record for record in self.records if record.project_id == project_id), None)
+
+    def outline_boundary_inputs(self, _user_id, project_ids):
+        self.boundary_reads += 1
+        if self.boundary is None:
+            return {}
+        return {project_id: dict(self.boundary) for project_id in project_ids}
 
 
 def record(*, matrix_status="review", blueprint_status="pending"):
@@ -68,6 +77,60 @@ def test_approved_internal_matrix_without_a_current_outline_stays_in_stage_three
     assert visible.current_stage == "planning"
     assert "matrix" not in visible.completed_stages
     assert visible.stage_states["matrix"]["status"] == "approved"
+
+
+def _ready_boundary(**overrides):
+    payload = {
+        "outline_artifact_id": "outline-1",
+        "outline_complete": "true",
+        "outline_has_markdown": "true",
+        "outline_source_matrix_artifact_id": "matrix-2",
+        "matrix_artifact_id": "matrix-2",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_list_uses_one_bulk_read_instead_of_one_outline_file_per_card():
+    """A list must resolve the 03/04 boundary without a per-project file read."""
+    principal = Principal("owner", frozenset({Role.USER}))
+    repository = ProjectRecords(record(), boundary=_ready_boundary())
+    service = ProjectService(repository)
+
+    def deep_check(*_args):
+        repository.deep_checks += 1
+        raise AssertionError("the bulk facts already answered the boundary")
+
+    service.outline_ready_for_chapter_planning = deep_check
+    listed = service.list_projects(principal)
+    assert repository.boundary_reads == 1
+    assert repository.deep_checks == 0
+    assert [item.current_stage for item in listed] == ["sections"]
+
+
+def test_list_falls_back_to_the_full_check_for_a_legacy_outline_and_for_other_matrices():
+    principal = Principal("owner", frozenset({Role.USER}))
+    # A legacy outline publishes no facts, so the answer is never guessed.
+    legacy = ProjectRecords(record(), boundary={
+        "outline_artifact_id": "outline-1", "matrix_artifact_id": "matrix-2",
+    })
+    service = ProjectService(legacy)
+    service.outline_ready_for_chapter_planning = lambda *_args: True
+    assert service.list_projects(principal)[0].current_stage == "sections"
+
+    # A different matrix artifact may still be compatible; only the full check knows.
+    elsewhere = ProjectRecords(record(), boundary=_ready_boundary(
+        outline_source_matrix_artifact_id="matrix-enriched"))
+    service = ProjectService(elsewhere)
+    service.outline_ready_for_chapter_planning = lambda *_args: True
+    assert service.list_projects(principal)[0].current_stage == "sections"
+
+    # An unusable Matrix stage cannot own the boundary, with or without facts.
+    stale = ProjectRecords(record(matrix_status="stale"), boundary=_ready_boundary())
+    service = ProjectService(stale)
+    service.outline_ready_for_chapter_planning = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("a stale Matrix stage settles the boundary"))
+    assert service.list_projects(principal)[0].current_stage == "planning"
 
 
 def test_outline_readiness_requires_complete_current_version_and_nonstale_matrix():

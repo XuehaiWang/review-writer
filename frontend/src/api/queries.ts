@@ -25,6 +25,7 @@ export const queryKeys = {
   me: ["me"] as const,
   projects: ["projects"] as const,
   taxonomyProfiles: ["taxonomy-profiles"] as const,
+  libraryIndexProgress: ["library", "index-progress"] as const,
   providerSettings: ["provider-settings"] as const,
   adminProviderSettings: ["admin", "provider-settings"] as const,
   adminProviderAudit: ["admin", "provider-audit"] as const,
@@ -42,6 +43,8 @@ export const queryKeys = {
   libraryMetadata: (paperId: string) => ["library", paperId, "metadata"] as const,
   libraryBibliographyAudit: (paperId: string) => ["library", paperId, "bibliography-audit"] as const,
   libraryMarkdown: (paperId: string) => ["library", paperId, "markdown"] as const,
+  planningMatrix: (projectId: string, paperId: string) =>
+    ["planning", projectId, "matrix", paperId] as const,
   job: (jobId: string) => ["job", jobId] as const,
 };
 
@@ -135,26 +138,36 @@ export const adminUsageQuery = queryOptions({
   queryFn: () => apiRequest<AdminUsageSummary>("/api/v1/admin/usage"),
 });
 
-export function libraryQuery(query: string) {
+/** One browsing page of papers. Hundreds of papers must not load in one call. */
+export const LIBRARY_PAGE_SIZE = 50;
+
+export type LibraryIndexProgress = { semantic_backfill?: LibraryList["semantic_backfill"] };
+
+export function libraryQuery(query: string, limit: number = LIBRARY_PAGE_SIZE) {
   return queryOptions({
-    queryKey: queryKeys.library(query),
-    queryFn: () => apiRequest<LibraryList>(`/api/v1/library/papers?q=${encodeURIComponent(query)}&mode=hybrid`),
+    queryKey: [...queryKeys.library(query), limit] as const,
+    queryFn: () => apiRequest<LibraryList>(
+      `/api/v1/library/papers?q=${encodeURIComponent(query)}&mode=hybrid&limit=${limit}`
+    ),
+    // Only this page's own index status keeps the list polling. Library-wide
+    // backfill progress lives on the light index-progress endpoint below, so a
+    // three-second tick never re-plans the whole library.
+    refetchInterval: (state) => state.state.data?.items.some((paper) =>
+      ["queued", "building"].includes(paper.index_status?.fulltext || "")
+    ) ? ACTIVE_JOB_POLL_INTERVAL_MS : false,
+  });
+}
+
+export function libraryIndexProgressQuery() {
+  return queryOptions({
+    queryKey: queryKeys.libraryIndexProgress,
+    queryFn: () => apiRequest<LibraryIndexProgress>("/api/v1/library/index-progress"),
     refetchInterval: (state) => {
-      const data = state.state.data;
-      const fulltextActive = data?.items.some((paper) =>
-        ["queued", "building"].includes(paper.index_status?.fulltext || "")
-      );
-      const semanticBackfillActive = ["queued", "running", "cancel_requested"].includes(
-        data?.semantic_backfill?.status || "",
-      );
-      if (fulltextActive || semanticBackfillActive) {
+      const status = state.state.data?.semantic_backfill?.status || "";
+      if (["queued", "running", "cancel_requested"].includes(status)) {
         return ACTIVE_JOB_POLL_INTERVAL_MS;
       }
-      return ["waiting_retry", "blocked_credit"].includes(
-        data?.semantic_backfill?.status || "",
-      )
-        ? 5 * 60 * 1000
-        : false;
+      return ["waiting_retry", "blocked_credit"].includes(status) ? 5 * 60 * 1000 : false;
     },
   });
 }

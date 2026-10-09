@@ -33,6 +33,22 @@ beforeEach(() => {
 afterEach(() => { cleanup(); client.clear(); vi.clearAllMocks(); });
 const openServices = () => fireEvent.click(screen.getByRole("button", { name: /^模型与服务/ }));
 
+it("groups runtime panels together and preserves unsaved concurrency settings across tabs", async () => {
+  fireEvent.click(screen.getByRole("button", { name: /^运行记录/ }));
+  const worker = await screen.findByRole("heading", { name: "Worker 运行状态" });
+  const concurrency = screen.getByRole("heading", { name: "模型并发额度" });
+  expect(worker.closest(".admin-runtime-grid")).toBe(concurrency.closest(".admin-runtime-grid"));
+  expect(worker.closest(".admin-runtime-grid")).not.toBeNull();
+  const inputs = await screen.findAllByLabelText("公共并发");
+  fireEvent.change(inputs[0], { target: { value: "12" } });
+  fireEvent.click(screen.getByRole("button", { name: /^用户与余额/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^运行记录/ }));
+  expect(screen.getAllByLabelText("公共并发")[0]).toHaveValue(12);
+  expect(screen.getByRole("button", { name: "保存并发设置" })).toBeEnabled();
+  expect(screen.getAllByRole("button", { name: "暂停接单" })).toHaveLength(6);
+  expect(vi.mocked(apiRequest).mock.calls.some(([, opts]) => opts?.method === "PUT")).toBe(false);
+});
+
 it("groups services and logs separately and loads failures only when opened", async () => {
   await screen.findByText("reader@test.invalid");
   expect(screen.queryByRole("heading", { name: "文本生成服务" })).toBeNull();

@@ -56,10 +56,16 @@ def generate(payload, call=call_json_model, *, completed=None, checkpoint=None):
         if sections.get(role):
             text = replace_section(text, role, sections[role])
             continue
-        purpose = ("Write 2-3 connected paragraphs, each 150-300 words (or comparable length in the manuscript's language), "
-                   "without separate subheadings. Synthesize, compare and judge across the reviewed studies rather than enumerate papers or repeat the body. "
-                   "Cover collective achievements, 2-3 specific challenges or scope limits where supported, and 1-2 review-level methodological insights or future directions. "
-                   "Tie limitations to the studies or classes discussed in the body; do not invent challenges to meet a count. Avoid vague calls for more research. "
+        purpose = ("Write a concise conclusion of this chemistry review, without separate subheadings or a fixed paragraph count. "
+                   "Compress: synthesize only the cross-cutting conclusions the reviewed studies collectively establish, "
+                   "the decisive limitations or boundaries, and a bounded outlook. "
+                   "Do not recap per-study results, numbers, conditions, substrate lists or mechanisms already given in the body, "
+                   "do not restate the introduction, and retain decisive counterexamples only when they change the conclusion. "
+                   "Aim for roughly 160-240 words (or comparable length in the manuscript's language), not a condensed copy of the manuscript. "
+                   "Merge related points into single sentences; every sentence must carry a cross-cutting claim, "
+                   "and any sentence that only repeats a body example must be dropped. "
+                   "Avoid repeated disclaimers and vague calls for more research. "
+                   "Discuss specific challenges and methodological insights only where the body supports them, not to fill a quota. "
                    "Distinguish outlook from established findings. Only current prose and realized claims may support conclusions; "
                    "never restore removed or provisional claims. Missing bindings do not establish missing source data. "
                    "Do not emit paper IDs or invent numeric citations; do not introduce topics or numerical rankings absent from the body."
@@ -68,7 +74,7 @@ def generate(payload, call=call_json_model, *, completed=None, checkpoint=None):
                    "Write one self-contained paragraph of 120-250 words (or comparable length in the manuscript's language). "
                    "No citations, new numerical claims, or future directions presented as established results.")
         try:
-            result = call("Write the " + role + " of this academic review in the manuscript's language. "
+            result = call("Write the " + role + " of this chemistry review in the manuscript's language. "
                 + purpose + " Rewrite rather than copy sentences. Do not invent facts or sources. "
                 "Author-edited text is context, not independently verified evidence. Return JSON {text:string}; "
                 "text must contain only section prose, no heading, metadata, or paragraph markers. "

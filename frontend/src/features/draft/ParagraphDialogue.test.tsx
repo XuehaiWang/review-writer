@@ -3,6 +3,17 @@ import { afterEach, expect, it, vi } from "vitest";
 import { CandidateComparison, type DialogueCandidate } from "./ParagraphDialogue";
 afterEach(cleanup);
 const candidate: DialogueCandidate = { candidate_id: "c1", paragraph_key: "k1", paragraph_id: "S1-p1", original_text: "Original text", candidate_text: "Revised text", reply: "Explanation", status: "pending" };
+it("unmatched source markers show readable advice without blocking author edits", () => {
+  const decide = vi.fn();
+  render(<CandidateComparison candidate={{ ...candidate, evidence_review: "references_unverified", validation_warnings: ["unmatched_source_references"], scientific_changes: [{ field: "numbers", before: ["1"], after: ["2"] }] }} decide={decide} />);
+  expect(screen.getByText("Explanation")).toBeVisible();
+  fireEvent.click(screen.getByText(/查看依据与检查详情|Evidence and check details/));
+  expect(screen.getByText(/回复已保留|The reply is retained/)).toBeVisible();
+  expect(screen.getByText(/1 → 2/)).toBeVisible();
+  expect(screen.queryByText("unmatched_source_references")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /保存候选|Save candidate/ }));
+  expect(decide).toHaveBeenCalledWith("c1", "accept");
+});
 it("shows comparison without scores and requires explicit acceptance", () => {
   const decide = vi.fn(); render(<CandidateComparison candidate={candidate} decide={decide} />);
   expect(screen.getByText("Original text")).toBeTruthy();

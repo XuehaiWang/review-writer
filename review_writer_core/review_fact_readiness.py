@@ -26,6 +26,8 @@ DEFAULT_REVIEW_FACT_ROLES: tuple[str, ...] = (
     "scope",
 )
 
+REVIEW_READING_STRATEGY = "review-oriented/1"
+
 
 FIGURE_CALLOUT_SUBJECT_RE = re.compile(
     r"(?:^|\b(?:as|also)\s+(?:shown|summarized|illustrated|depicted)\s+in\s+)"
@@ -398,10 +400,19 @@ def fact_processing_state(facts, enrichment):
     recovery = ("failed" if profile.get("source_recovery_errors") else "pending"
                 if recovery_requested and stop in {"retrieval_unavailable", "provider_or_budget_unavailable"}
                 else "completed") if recovery_requested or profile.get("source_recovery_errors") else "not_required"
-    return {"processing": {"extraction": extraction,
+    processing = {"extraction": extraction,
             "verification": "pending" if pending else "completed" if facts else "not_required",
-            "source_recovery": recovery},
-            "pending_fact_count": len(pending), "verified_fact_count": len(facts) - len(pending)}
+            "source_recovery": recovery}
+    if profile.get("reading_strategy") == REVIEW_READING_STRATEGY:
+        reading = profile.get("reading_status")
+        processing["reading"] = reading if reading in {"completed", "failed"} else "pending"
+        # A source-bound guide can complete reading even without a reusable fact.
+        if processing["reading"] == "completed":
+            processing["extraction"] = "completed"
+    return {"processing": processing,
+            "pending_fact_count": len(pending), "verified_fact_count": len(facts) - len(pending),
+            "pending_revision_fact_ids": [fact["fact_id"] for fact in pending
+                                          if fact.get("fact_id") and fact.get("revision_of_fact_id")]}
 
 
 def fact_processing_complete(facts, enrichment):
@@ -409,3 +420,18 @@ def fact_processing_complete(facts, enrichment):
     stop = (enrichment.get("fact_extraction_profile") or {}).get("stop_reason")
     return (all(value in {"completed", "not_required"} for value in state.values())
             and stop not in {"provider_or_budget_unavailable", "retrieval_unavailable", "extraction_failed"})
+
+
+def paper_reading_current(facts, enrichment, *, source_key=None):
+    """Completion of ordinary reading, never permission to use an unaudited fact.
+
+    Callers validate source ownership/currentness before consulting this receipt.
+    Explicit revisions and targeted audits still use fact_processing_complete.
+    Old records retain their existing completion semantics.
+    """
+    profile = enrichment.get("fact_extraction_profile") or {}
+    if profile.get("reading_strategy") != REVIEW_READING_STRATEGY:
+        return fact_processing_complete(facts, enrichment)
+    recorded_key = str(profile.get("reading_source_key") or "")
+    return bool(recorded_key and profile.get("reading_status") == "completed"
+                and (source_key is None or recorded_key == str(source_key)))

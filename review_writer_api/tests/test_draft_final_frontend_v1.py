@@ -29,6 +29,9 @@ class DraftFinalFrontendV1Tests(unittest.TestCase):
 
     def test_draft_renders_dialogue_comparisons_and_persisted_job_status(self) -> None:
         source = DRAFT.read_text(encoding="utf-8")
+        # Manual editing is composed inside the complete-manuscript reader.
+        self.assertIn("EditableManuscript", source)
+        source += (DRAFT.parent / "EditableManuscript.tsx").read_text(encoding="utf-8")
         for token in (
             "CandidateComparison",
             "ParagraphManualEditor",

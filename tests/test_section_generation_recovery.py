@@ -6,7 +6,8 @@ from unittest.mock import Mock
 import pytest
 
 from review_writer_core.stages.sections.coverage import (
-    missing_primary_papers, required_primary_papers, reusable_section_entries,
+    check_historical_resume, matching_section_inputs, missing_primary_papers, required_primary_papers,
+    reusable_section_entries, section_input_fingerprints,
 )
 from review_writer_core.scientific_facts import attach_fact_to_evidence
 from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
@@ -125,6 +126,56 @@ def test_pending_checkpoint_reuses_only_canonical_notice_with_unchanged_evidence
     assert not reusable_section_entries({"s": entry}, tasks, {"s": changed})[0]
     output["draft_md"] += "Unsupported conclusion."
     assert not reusable_section_entries({"s": entry}, tasks, {"s": package})[0]
+
+
+def test_same_section_id_with_changed_heading_cannot_reuse_old_prose():
+    entry = checkpoint_entry()
+    entry["output"]["heading"] = "Conjugated enynes"
+    changed_task = {"section_id": "s", "heading": "Propargylic alcohols", "primary_papers": ["paper-a"]}
+    retained, rejected = reusable_section_entries({"s": entry}, [changed_task], {"s": {}})
+    assert retained == {}
+    assert "topic changed" in rejected["s"].lower()
+
+
+def test_same_section_id_with_changed_topic_changes_resume_fingerprint():
+    old_tasks = [
+        {"section_id": "S01", "heading": "Propargylic alcohols", "review_problem": "Which alcohols form allenes?",
+         "primary_papers": ["P1"], "allowed_papers": ["P1"]},
+        {"section_id": "S04", "heading": "Conjugated enynes", "review_problem": "Which enynes form allenes?",
+         "primary_papers": ["P1"], "allowed_papers": ["P1"]},
+    ]
+    old_blueprint = {"resolved_outline_md": "## Propargylic alcohols\n## Conjugated enynes",
+                     "scope_contract": {"question": "Which routes form allenes?"},
+                     "sections": [{"section_id": task["section_id"], "title": task["heading"],
+                                   "review_problem": task["review_problem"], "primary_papers": ["P1"]}
+                                  for task in old_tasks]}
+    matrix = {"rows": [{"paper_id": "P1"}]}
+    old_shared = {"model": "text-model", "outline": "## Propargylic alcohols\n## Conjugated enynes"}
+    old_signature = section_input_fingerprints(old_tasks, {}, matrix, old_blueprint, old_shared)
+    entries = {sid: {"input_fingerprint": signature, **checkpoint_entry()}
+               for sid, signature in old_signature.items()}
+
+    changed_tasks = [{**old_tasks[0]}, {**old_tasks[1], "heading": "Allene products from enynes",
+                    "review_problem": "Which enynes provide axially chiral allenes?"}]
+    changed_blueprint = {"sections": [{"section_id": task["section_id"], "title": task["heading"],
+                                       "review_problem": task["review_problem"], "primary_papers": ["P1"]}
+                                      for task in changed_tasks],
+                        "resolved_outline_md": "## Propargylic alcohols\n## Allene products from enynes",
+                        "scope_contract": {"question": "Which routes form allenes?"}}
+    expanded_matrix = {"rows": [{"paper_id": "P1"}, {"paper_id": "P2"}]}
+    changed_shared = {"model": "text-model", "outline": "## Propargylic alcohols\n## Allene products from enynes"}
+    changed_signature = section_input_fingerprints(changed_tasks, {}, expanded_matrix, changed_blueprint, changed_shared)
+    assert old_signature["S04"] != changed_signature["S04"]
+    assert old_signature["S01"] == changed_signature["S01"]
+    retained, rejected = matching_section_inputs(entries, changed_signature)
+    assert set(retained) == {"S01"}
+    assert set(rejected) == {"S04"}
+    assert rejected == {"S04": "Section authoring inputs changed."}
+    # An older checkpoint without authoring settings can still safely resume:
+    # S01 has an exact match, while S04 is specifically invalidated by its own
+    # recorded fingerprint instead of blocking or replaying the whole batch.
+    check_historical_resume({"project_id": "p", "entries": entries}, changed_signature,
+                            project_id="p", rejected_entries=rejected)
 
 
 def checkpoint_entry(paper="paper-a"):

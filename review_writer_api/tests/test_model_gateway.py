@@ -135,6 +135,18 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(diag["first_reasoning_ms"])
             self.assertNotIn("private thought", json.dumps(row.response_json))
 
+    async def test_output_limit_stream_is_not_accepted_as_complete_json(self):
+        from review_writer_api.model_gateway import GatewayProviderError
+        raw = ('data: {"choices":[{"delta":{"content":"{\\"question\\":\\"partial"},"finish_reason":"length"}]}\n\n'
+               'data: [DONE]\n\n')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:
+                httpx.Response(200, headers={"content-type": "text/event-stream"}, content=raw))) as client:
+            with mock.patch.object(self.service, "_provider_client", client):
+                with self.assertRaises(GatewayProviderError) as raised:
+                    await self.service._stream_text_response(
+                        "https://test.example/v1", {}, {}, str(uuid.uuid4()), "chat-completions", None)
+        self.assertEqual("output_limit", raised.exception.gateway_detail["details"]["category"])
+
     async def test_overview_does_not_starve_reasoning_models_with_a_small_shared_budget(self):
         for wire, field in (("chat-completions", "max_tokens"), ("responses", "max_output_tokens")):
             captured = []
@@ -280,7 +292,7 @@ class ModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             counters = self.service._reserve_text_attempt(request_id, len(prompt))
             external_calls.append(prompt)
             return {**answer, "_gateway_metering": counters}
-        with mock.patch.object(self.service, "_provider_call", new=mock.AsyncMock(side_effect=provider_attempt)) as provider:
+        with mock.patch.object(self.service, "_provider_call", new=mock.AsyncMock(side_effect=provider_attempt)):
             for index, child_id in enumerate(children):
                 token = self.service.issue_task_token(
                     job_id=child_id, user_id=str(self.user_id),

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import json
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -13,6 +16,35 @@ DEFAULT_TEXT_MODEL = "gpt-5.4"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_TEXT_WIRE_API = "chat-completions"
 DEFAULT_IMAGE_WIRE_API = "images"
+
+
+def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
+    """Decode provider bytes consistently for redraws and Overview requests."""
+    if not raw.strip():
+        raise RuntimeError(f"{label} returned an empty response body")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        preview = raw.decode("utf-8", "replace")[:300].replace("\r", " ").replace("\n", " ")
+        raise RuntimeError(f"{label} returned non-JSON content: {preview or '<empty>'}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{label} returned JSON {type(data).__name__}, expected an object")
+    return data
+
+
+def load_dotenv(review_root: Path) -> None:
+    """Load local provider settings, never overriding process/task credentials."""
+    path = review_root / ".env"
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.removeprefix("export ").strip()
+        if key:
+            os.environ.setdefault(key, value.strip().strip("'\""))
 
 
 def normalize_base_url(value: str, default: str = DEFAULT_OPENAI_BASE_URL) -> str:

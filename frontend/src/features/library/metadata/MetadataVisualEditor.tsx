@@ -18,6 +18,21 @@ import {
 } from "./metadataEditorModel";
 
 
+export type ManualReviewConflict = {
+  field?: string;
+  suggested?: { source?: string; value?: unknown; confidence?: number };
+};
+
+function displayFieldValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(displayFieldValue).filter(Boolean).join("; ");
+  if (isMetadataObject(value)) {
+    const name = value.name ?? [value.given, value.family].filter(Boolean).join(" ");
+    return displayFieldValue(name);
+  }
+  return metadataTextForEditing(value).trim();
+}
+
+
 function MetadataFieldStatus({ metadata, field }: { metadata: MetadataRecord; field: BibliographicField }) {
   const { text } = useUiText();
   const confidence = metadataFieldConfidence(metadata, field);
@@ -39,6 +54,7 @@ export function MetadataVisualEditor({
   reextracting,
   reextractResult,
   error,
+  manualReviewConflicts = [],
   onChange,
   onSave,
   onReview,
@@ -51,6 +67,7 @@ export function MetadataVisualEditor({
   reextracting: boolean;
   reextractResult: string;
   error: Error | null;
+  manualReviewConflicts?: ManualReviewConflict[];
   onChange: (next: MetadataRecord) => void;
   onSave: () => void;
   onReview: () => void;
@@ -93,6 +110,14 @@ export function MetadataVisualEditor({
     ? new Date(reviewedAt).toLocaleString(language === "en" ? "en-US" : "zh-CN")
     : "";
   const setField = (field: BibliographicField, value: unknown) => onChange(updateBibliographicField(draft, field, value));
+  const editableFieldLabels: Record<string, string> = {
+    title: text("论文标题", "Title"),
+    authors: text("作者", "Authors"),
+    year: text("发表年份", "Year"),
+    journal: text("期刊 / 出版物", "Journal"),
+    doi: "DOI",
+    abstract: text("论文摘要", "Abstract"),
+  };
 
   return (
     <form className="editor-panel metadata-review-panel" onSubmit={(event) => { event.preventDefault(); if (dirty && !validationError && !saving && !reviewing) onSave(); }}>
@@ -114,6 +139,30 @@ export function MetadataVisualEditor({
           </button>
         </div>
       </div>
+
+      {manualReviewConflicts.length ? <section className="message message-warning metadata-manual-conflicts" role="status">
+        <strong>{text(
+          `有 ${manualReviewConflicts.length} 个人工核对过的字段与来源不一致`,
+          `${manualReviewConflicts.length} manually checked field(s) disagree with the sources`,
+        )}</strong>
+        <p>{text(
+          "人工核对过的字段不会被自动改写。对照原文后可以一键采用来源值，也可以保留你的填写。",
+          "Manually checked fields are never overwritten automatically. Compare with the source, then adopt the suggested value or keep your entry.",
+        )}</p>
+        <ul>{manualReviewConflicts.map((row, index) => {
+          const field = String(row.field || "");
+          const suggested = displayFieldValue(row.suggested?.value);
+          const editable = Object.prototype.hasOwnProperty.call(editableFieldLabels, field);
+          return <li key={`${field}:${index}`}>
+            <div>
+              <strong>{editableFieldLabels[field] || field}</strong>
+              <span>{text("当前", "Current")}: {displayFieldValue(metadataFieldValue(draft, field)) || text("空", "empty")}</span>
+              <span>{text("来源建议", "Suggested")}: {suggested || text("—", "—")}{row.suggested?.source ? ` · ${row.suggested.source}` : ""}</span>
+            </div>
+            {editable && suggested && !dirty ? <button className="button button-secondary" type="button" disabled={saving || reviewing} onClick={() => setField(field as BibliographicField, row.suggested?.value)}>{text("采用来源建议值", "Adopt suggested value")}</button> : null}
+          </li>;
+        })}</ul>
+      </section> : null}
 
       <section className="metadata-form-section" aria-labelledby="metadata-bibliography-title">
         <header>

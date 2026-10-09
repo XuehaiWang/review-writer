@@ -1,4 +1,4 @@
-"""Versioned Matrix, outline, and Blueprint routes."""
+"""Stage 03 paper reading and outline routes; legacy chapter-plan aliases."""
 
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ from review_writer_api.planning_jobs import queue_matrix_enrichment
 from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.job_service import JobService
 from review_writer_api.routers.jobs import _job_response
+from review_writer_api.routers.sections import build_chapter_planning_router
 from review_writer_api.security import Principal
 from review_writer_api.workflow_schemas import (
-    BlueprintRestoreRequest,
-    BlueprintGenerateRequest,
-    BlueprintConfirmRequest,
     MatrixLimitedModeRequest,
     MatrixRowUpdateRequest,
     OutlineRecommendationRequest,
@@ -42,6 +40,14 @@ def build_planning_router(
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
         return planning_service.get(principal, project_id)
+
+    @router.get("/matrix/{paper_id}")
+    def get_matrix_row(
+        project_id: str,
+        paper_id: str,
+        principal: Principal = Depends(principal_dependency),
+    ) -> dict[str, Any]:
+        return planning_service.matrix_row(principal, project_id, paper_id)
 
     @router.put("/matrix/{paper_id}")
     def update_matrix_row(
@@ -152,58 +158,8 @@ def build_planning_router(
             content_base64=payload.content_base64,
         )
 
-    @router.post("/blueprint", status_code=status.HTTP_202_ACCEPTED)
-    @router.post("/blueprint/jobs", status_code=status.HTTP_202_ACCEPTED)
-    def plan_blueprint(
-        project_id: str, payload: BlueprintGenerateRequest,
-        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
-        principal: Principal = Depends(principal_dependency),
-    ):
-        """Both public entries submit the same source-grounded argument planning job."""
-        if payload.draft_quality_artifact_id:
-            raise WorkflowConflict("Draft argument repairs now run in Draft optimization. Refresh the page and generate a joint revision there.")
-        prepared = planning_service.blueprint_job_payload(principal, project_id, revision=payload.revision)
-        request_key = idempotency_key.strip() or str(uuid.uuid4())
-        try:
-            job = job_service.submit(
-                principal, scope="project", project_id=project_id, job_type="planning.blueprint",
-                idempotency_key=request_key, operation_key="blueprint-planning", payload=prepared,
-            )
-        except WorkflowConflict as conflict:
-            existing_id = conflict.details.get("existing_job_id")
-            if not existing_id:
-                raise
-            existing = job_service.status(principal, existing_id)
-            # Preparation adds timestamps and checkpoints. For an already scoped
-            # idempotency key, compare the client request, not those derived fields.
-            if (existing.idempotency_key != request_key
-                    or existing.payload.get("blueprint_revision") != payload.revision
-                    or existing.payload.get("draft_repair_input_artifacts") != prepared.get("draft_repair_input_artifacts")):
-                raise
-            job = existing
-        return _job_response(job)
-
-    @router.post("/blueprint/confirm")
-    def confirm_blueprint(
-        project_id: str,
-        payload: BlueprintConfirmRequest,
-        principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        return planning_service.confirm_blueprint(
-            principal, project_id, revision=payload.revision, artifact_id=payload.artifact_id
-        )
-
-    @router.post("/blueprint/restore")
-    def restore_blueprint(
-        project_id: str,
-        payload: BlueprintRestoreRequest,
-        principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        return planning_service.restore_blueprint(
-            principal,
-            project_id,
-            revision=payload.revision,
-            artifact_id=payload.artifact_id,
-        )
-
+    router.include_router(build_chapter_planning_router(
+        principal_dependency, planning_service, job_service,
+        prefix="", legacy=True,
+    ))
     return router

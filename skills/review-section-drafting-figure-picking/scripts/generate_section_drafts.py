@@ -39,7 +39,7 @@ from review_writer_core.providers import (  # noqa: E402
 )
 from review_writer_core.text_safety import make_xml_compatible  # noqa: E402
 from review_writer_core.scientific_facts import (  # noqa: E402
-    claim_assertion_ceiling, fact_claim_issues, registered_fact_bindings, writable_evidence_keys,
+    claim_assertion_ceiling, fact_claim_issues, registered_fact_bindings, writing_fact_guidance,
 )
 from review_writer_core.stages.sections.fact_routing import (  # noqa: E402
     FACT_ROUTING_CONTRACT,
@@ -49,24 +49,20 @@ from review_writer_core.evidence_integrity import (  # noqa: E402
     unsupported_realization_anchors,
 )
 from review_writer_core.writing_contracts import (  # noqa: E402
-    CASE_PARAGRAPH_MAX_WORDS,
-    CASE_PARAGRAPH_MIN_WORDS,
     derive_writing_scope_contract,
     writing_scope_prompt_block,
-    section_constraint_prompt_block,
 )
 from review_writer_core.model_gateway_client import (  # noqa: E402
     GatewayRequestError,
     call_json_model as call_gateway_json,
     gateway_configured,
     parse_json_object_text as _parse_json_object_text,
+    structured_json_prompt,
 )
 from review_writer_core.review_fact_readiness import (  # noqa: E402
-    negative_claim_eligibility,
+    REVIEW_READING_STRATEGY,
 )
 from review_writer_core.claim_contracts import (  # noqa: E402
-    claim_is_executable,
-    argument_projection,
     claim_support_coverage,
     derive_section_readiness,
 )
@@ -75,25 +71,25 @@ from review_writer_core.paragraph_citations import render_paragraph_citations  #
 from review_writer_core.stages.sections.authoring import paragraph_parts
 from review_writer_core.section_narrative_contracts import (  # noqa: E402
     CANONICAL_PARAGRAPH_ROLES,
-    canonical_argument_role,
+    build_paragraph_plan,
     derive_narrative_diagnostics,
     resolve_section_depth_contract,
 )
 from review_writer_core.stages.sections.rule_packs import (  # noqa: E402
-    RULE_PACK_PROMPT_VERSION, load_rule_pack_text,
+    RULE_PACK_PROMPT_VERSION, load_drafting_rule_pack_text,
 )
 from review_writer_core.stages.sections.evidence_resolution import pending_markdown, resolution_record
 from review_writer_core.stages.sections.execution import run_sections, chapter_responsibilities
-from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, AUTHORING_VERSION, write_from_sources, valid_source_claim, passage_eligible
+from review_writer_core.manuscript_coherence import paragraph_records
+from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, AUTHORING_VERSION, write_from_sources, valid_source_claim, passage_eligible, section_audit_mode
+from review_writer_core.stages.sections.source_supplement import evidence_mailbox, checkpoint_supplement_sections
 from review_writer_core.source_attribution import contribution_context
 from review_writer_core.publication_tables import paper_presentation_outcomes
 from review_writer_core.stages.sections.coverage import (  # noqa: E402
-    claim_fact_identity_gaps,
-    direct_claim_papers,
     missing_primary_papers,
     required_primary_papers,
     reusable_section_entries,
-    section_input_fingerprints, matching_section_inputs,
+    section_input_fingerprints, matching_section_inputs, checkpoint_authoring_settings, check_historical_resume,
 )
 
 
@@ -240,7 +236,7 @@ def load_blueprint_rule_pack(_review_root: Path, blueprint: dict[str, Any]) -> s
     # ``review_root`` points at per-user project storage in hosted mode.  Rule
     # packs are immutable application resources and live beside this script,
     # under the bootstrap root discovered above.
-    return load_rule_pack_text(_BOOTSTRAP_ROOT, blueprint)
+    return load_drafting_rule_pack_text(_BOOTSTRAP_ROOT, blueprint)
 
 
 def load_cross_study_synthesis_skill() -> str:
@@ -342,10 +338,7 @@ def call_structured_llm(
     schema_name: str,
     required_list: str = "",
 ) -> dict[str, Any]:
-    schema_prompt = (
-        f"{prompt}\n\nReturn only one JSON object matching this JSON Schema exactly:\n"
-        f"{json.dumps(schema, ensure_ascii=False)}"
-    )
+    schema_prompt = structured_json_prompt(prompt, schema)
     if gateway_configured():
         return repair_model_unicode(
             call_gateway_json(
@@ -546,33 +539,6 @@ def manuscript_word_count(value: Any) -> int:
     )
 
 
-def target_word_floor(value: Any) -> int:
-    """Read a conservative lower depth bound from current and legacy specs."""
-
-    if isinstance(value, dict):
-        for key in ("min", "minimum", "lower"):
-            try:
-                candidate = int(value.get(key) or 0)
-            except (TypeError, ValueError):
-                continue
-            if candidate > 0:
-                return candidate
-        return 0
-    if isinstance(value, (int, float)):
-        return max(0, int(float(value) * 0.7))
-    match = re.search(
-        r"\b(\d{2,6})\s*(?:[-–—~]|to)\s*\d{2,6}\b",
-        str(value or ""),
-        re.I,
-    )
-    if match:
-        return int(match.group(1))
-    try:
-        return max(0, int(str(value or "").strip()) * 7 // 10)
-    except ValueError:
-        return 0
-
-
 def bounded_evidence_payload(
     evidence: list[dict[str, Any]],
     *,
@@ -582,6 +548,7 @@ def bounded_evidence_payload(
     """Project once; truncate text only if the complete projection cannot fit."""
 
     rows = [item for item in evidence if isinstance(item, dict)]
+    bindings = registered_fact_bindings(rows, {str(row.get("paper_id") or "") for row in rows})
     primary = set(primary_papers or [])
     char_budget = max(2, int(char_budget))
     per_content = max(160, min(1800, char_budget // max(1, len(rows)) - 360))
@@ -613,10 +580,9 @@ def bounded_evidence_payload(
                 # Only fields read by write_from_sources belong in this prompt
                 # projection. Full quotes/refs remain in the authoritative registry;
                 # repeating them here can crowd out the actual primary passages.
-                "fact_bindings": [{key: binding.get(key) for key in (
-                    "fact_id", "paper_id", "field_id", "value", "usage",
-                    "study_ownership", "assertion_ceiling", "evidence_ceiling")}
-                    for binding in row.get("fact_bindings") or []],
+                "fact_bindings": [guide for binding in row.get("fact_bindings") or []
+                    if str(binding.get("fact_id") or "") in bindings
+                    if (guide := writing_fact_guidance(bindings[str(binding["fact_id"])]))],
                 "epistemic_status": row.get("epistemic_status"),
                 "normalized_fact_value": compact_text(
                     row.get("normalized_fact_value"), limit=500
@@ -649,9 +615,15 @@ def bounded_evidence_payload(
     # Budget the serialized payload, not only content strings. Fact bindings
     # used to bypass the cap by repeating full quotes and audit records.
     groups: dict[str, list[dict[str, Any]]] = {}
+    recovered_keys = {
+        str(row.get("evidence_key") or "") for row in rows
+        if "primary_contribution_recovery" in (row.get("retrieval_passes") or [])
+    }
     for row in compacted:
         row = {key: value for key, value in row.items() if value is not None and value != "" and value != []}
         groups.setdefault(str(row.get("paper_id") or ""), []).append(row)
+    for group in groups.values():
+        group.sort(key=lambda row: 0 if str(row.get("evidence_key") or "") in recovered_keys else 1)
     selected, used = [], 2
     # Round-robin within primary studies first; background cannot consume the
     # budget before a chapter's own results/methods/scope reach the writer.
@@ -691,513 +663,6 @@ def effective_retrieval_mode(section_evidence: dict[str, Any]) -> str:
     ):
         return "insufficient_evidence"
     return mode
-
-
-def normalize_section_plan(
-    *,
-    section_id: str,
-    role: str,
-    primary: list[str],
-    supporting: list[str],
-    allowed: list[str],
-    evidence: list[dict[str, Any]],
-    retrieval_mode: str,
-    generated: dict[str, Any],
-    synthesis_requirements: list[dict[str, Any]],
-    declared_claims: list[dict[str, Any]] | None = None,
-    depth_contract: dict[str, Any] | None = None,
-    strict: bool = True,
-    paragraph_start_index: int = 1,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Convert a model proposal into a deterministic evidence-bound contract."""
-
-    retrieval_mode = normalize_retrieval_mode(retrieval_mode)
-    if retrieval_mode == "unsupported_retrieval_mode":
-        raise RuntimeError(f"Unsupported section retrieval mode for {section_id}.")
-    enforce_declared_claims = role == "body" and declared_claims is not None
-    declared_by_id = {
-        str(claim.get("claim_id") or ""): dict(claim)
-        for claim in declared_claims or []
-        if isinstance(claim, dict)
-        and str(claim.get("claim_id") or "")
-        and claim_is_executable(claim)
-    }
-    assigned_declared_claim_ids: set[str] = set()
-    fact_registry = registered_fact_bindings(evidence, allowed)
-    writable_keys = writable_evidence_keys(evidence, allowed)
-    evidence_by_key = {
-        str(item.get("evidence_key") or ""): item
-        for item in evidence
-        if isinstance(item, dict)
-        and str(item.get("evidence_key") or "")
-        and str(item.get("paper_id") or "") in allowed
-        and str(item["evidence_key"]) in writable_keys
-    }
-    evidence_paper_by_key = {
-        key: str(item.get("paper_id") or "")
-        for key, item in evidence_by_key.items()
-    }
-    requirement_by_type = {
-        str(item.get("component") or "").strip(): item
-        for item in synthesis_requirements
-        if isinstance(item, dict) and str(item.get("component") or "").strip()
-    }
-    components: list[dict[str, Any]] = []
-    used_component_types: set[str] = set()
-    for index, raw in enumerate(generated.get("components") or [], start=1):
-        if not isinstance(raw, dict):
-            continue
-        component_type = compact_text(raw.get("component_type"), limit=80).casefold()
-        if not component_type or component_type in used_component_types:
-            continue
-        if requirement_by_type and component_type not in requirement_by_type:
-            continue
-        keys = list(
-            dict.fromkeys(
-                str(key)
-                for key in raw.get("evidence_keys") or []
-                if str(key) in evidence_by_key
-            )
-        )
-        if retrieval_mode == "lexical" and not keys:
-            continue
-        requirement = requirement_by_type.get(component_type, {})
-        component_id = f"{section_id}-{component_type}-{index:02d}"
-        components.append(
-            {
-                "component_id": component_id,
-                "component_type": component_type,
-                "necessity": str(requirement.get("necessity") or "recommended"),
-                "purpose": compact_text(raw.get("purpose") or requirement.get("reason")),
-                "status": "supported" if keys else "source_bounded_fallback",
-                "summary": compact_text(raw.get("summary")),
-                "evidence_keys": keys,
-                "provenance": "evidence_first_planner",
-            }
-        )
-        used_component_types.add(component_type)
-    for component_type, requirement in requirement_by_type.items():
-        if component_type in used_component_types:
-            continue
-        components.append(
-            {
-                "component_id": f"{section_id}-{component_type}-{len(components) + 1:02d}",
-                "component_type": component_type,
-                "necessity": str(requirement.get("necessity") or "recommended"),
-                "purpose": compact_text(requirement.get("reason")),
-                "status": "insufficient_evidence",
-                "summary": "",
-                "evidence_keys": [],
-                "provenance": "deterministic_requirement_adapter",
-            }
-        )
-
-    paragraph_plans: list[dict[str, Any]] = []
-    claim_plans: list[dict[str, Any]] = []
-    covered_primary: set[str] = set()
-    rejected_claims: list[dict[str, Any]] = []
-    # Every returned/added slot must be validated. Silently slicing the plan
-    # loses primary-paper coverage and can discard targeted repairs at its end.
-    raw_paragraphs = [
-        item
-        for item in (generated.get("paragraphs") or [])
-        if isinstance(item, dict)
-    ]
-    for paragraph_index, raw_paragraph in enumerate(raw_paragraphs, start=paragraph_start_index):
-        if not isinstance(raw_paragraph, dict):
-            continue
-        paragraph_id = f"{section_id}-p{paragraph_index}"
-        paragraph_claim_ids: list[str] = []
-        paragraph_papers: list[str] = []
-        for claim_index, raw_claim in enumerate(
-            (raw_paragraph.get("claims") or []), start=1
-        ):
-            if not isinstance(raw_claim, dict):
-                continue
-            proposed_claim_id = compact_text(
-                raw_claim.get("claim_id"), limit=120
-            )
-            blueprint_claim = declared_by_id.get(proposed_claim_id)
-            claim_id = (
-                proposed_claim_id
-                if enforce_declared_claims and proposed_claim_id
-                else f"{paragraph_id}-C{claim_index:02d}"
-            )
-            def reject(*reasons):
-                rejected_claims.append({
-                    "paragraph_id": paragraph_id, "claim_id": claim_id,
-                    "claim": compact_text(raw_claim.get("claim")), "reasons": list(reasons),
-                    "fact_ids": list(raw_claim.get("fact_ids") or []),
-                    "evidence_keys": list(raw_claim.get("evidence_keys") or []),
-                })
-            if enforce_declared_claims and blueprint_claim is None:
-                reject("unregistered_blueprint_claim_id")
-                continue
-            if enforce_declared_claims and claim_id in assigned_declared_claim_ids:
-                reject("duplicate_blueprint_claim_id")
-                continue
-            source_claim = blueprint_claim or raw_claim
-            if source_claim.get("argument_basis") and not claim_is_executable(source_claim):
-                reject("argument_verification_stale_or_missing")
-                continue
-            support_status = compact_text(
-                source_claim.get("support_status"), limit=40
-            ).casefold()
-            if support_status not in SUPPORT_STATUSES:
-                support_status = "partially_supported"
-            # A blocked proposal is diagnostic input, not publishable content.
-            if support_status == "blocked":
-                reject("planner_marked_blocked")
-                continue
-            requested_fact_ids = list(dict.fromkeys(
-                str(fid) for fid in source_claim.get("fact_ids") or [] if fid
-            ))
-            if requested_fact_ids and set(requested_fact_ids) - fact_registry.keys():
-                reject("unregistered_or_ineligible_fact_selection")
-                continue
-            selected_bindings = [fact_registry[fid] for fid in requested_fact_ids]
-            proposed_keys = ([ref["evidence_key"] for binding in selected_bindings for ref in binding["evidence_refs"]]
-                             if requested_fact_ids else raw_claim.get("evidence_keys") or [])
-            keys = list(
-                dict.fromkeys(
-                    str(key)
-                    for key in proposed_keys
-                    if str(key) in evidence_by_key
-                )
-            )
-            key_papers = list(
-                dict.fromkeys(
-                    evidence_paper_by_key[key]
-                    for key in keys
-                    if evidence_paper_by_key.get(key) in allowed
-                )
-            )
-            proposed_group = list(
-                dict.fromkeys(
-                    str(paper_id)
-                    for paper_id in (
-                        [
-                            *(source_claim.get("primary_papers") or []),
-                            *(source_claim.get("comparison_papers") or []),
-                        ]
-                        if blueprint_claim is not None
-                        else source_claim.get("citation_group") or []
-                    )
-                    if str(paper_id) in allowed
-                )
-            )
-            citation_group = key_papers if retrieval_mode == "lexical" else proposed_group
-            if retrieval_mode == "lexical" and (not keys or not citation_group):
-                reject("no_registered_source")
-                continue
-            if retrieval_mode != "lexical" and not citation_group:
-                citation_group = [
-                    str(item)
-                    for item in raw_paragraph.get("paper_ids") or []
-                    if str(item) in allowed
-                ][:2]
-            if not citation_group:
-                reject("no_allowed_citation")
-                continue
-            claim_text = compact_text(
-                source_claim.get("proposition")
-                or source_claim.get("claim")
-            )
-            if not claim_text:
-                reject("empty_claim")
-                continue
-            if NEGATIVE_SOURCE_STATEMENT_RE.search(claim_text) and not any(
-                negative_claim_eligibility(
-                    evidence_by_key[key].get("fact_state"),
-                    evidence_by_key[key].get("checked_sources") or [],
-                )
-                for key in keys
-            ):
-                # Retrieval misses are workflow diagnostics, not evidence that
-                # a publication omitted a scientific fact.  Dropping the
-                # proposal sends the plan through its normal repair path.
-                reject("source_absence_not_verified")
-                continue
-            claim_kind = compact_text(
-                source_claim.get("claim_kind")
-                or source_claim.get("claim_type"),
-                limit=80,
-            ).casefold()
-            claim_kind = {
-                "reported_result": "reported_finding",
-                "comparison": "cross_study_comparison",
-                "cross_study_comparison": "cross_study_comparison",
-                "mechanism": "mechanism_interpretation",
-                "scope": "reported_finding",
-                "limitation": "reported_finding",
-            }.get(claim_kind, claim_kind)
-            if claim_kind not in CLAIM_KINDS:
-                claim_kind = "reported_finding"
-            epistemic_status = compact_text(
-                source_claim.get("epistemic_status"), limit=80
-            ).casefold()
-            if epistemic_status not in EPISTEMIC_STATUSES:
-                epistemic_status = "direct_source_report"
-            if retrieval_mode != "lexical":
-                support_status = "partially_supported"
-            evidence_refs = [
-                {
-                    "evidence_id": evidence_by_key[key].get("evidence_id"),
-                    "evidence_key": key,
-                    "relationship": "supports",
-                }
-                for key in keys
-            ]
-            fact_ids = list(
-                dict.fromkeys(
-                    str(fact_id)
-                    for key in keys
-                    for fact_id in evidence_by_key[key].get("fact_ids") or []
-                    if str(fact_id)
-                )
-            )
-            normalized_fact_values = list(
-                dict.fromkeys(
-                    compact_text(evidence_by_key[key].get("normalized_fact_value"), limit=800)
-                    for key in keys
-                    if compact_text(
-                        evidence_by_key[key].get("normalized_fact_value"), limit=800
-                    )
-                )
-            )
-            if requested_fact_ids:
-                invalid_fact_ids = claim_fact_identity_gaps(
-                    {
-                        "fact_ids": requested_fact_ids,
-                        "evidence_refs": evidence_refs,
-                    },
-                    evidence_by_key,
-                )
-                if invalid_fact_ids:
-                    reject(
-                        "fact_identity_outside_selected_evidence:"
-                        + ",".join(sorted(invalid_fact_ids))
-                    )
-                    continue
-                fact_ids = requested_fact_ids
-                normalized_fact_values = [str(binding["value"]) for binding in selected_bindings]
-                issues = fact_claim_issues(claim_text, selected_bindings, claim_kind=claim_kind)
-                if issues:
-                    reject(*issues)
-                    continue
-            elif any(evidence_by_key[key].get("fact_bindings") for key in keys):
-                # Do not evade experiment-level checks by omitting fact_ids.
-                reject("registered_fact_selection_required")
-                continue
-            elif any(not evidence_by_key[key].get("claim_eligible", True) for key in keys):
-                reject("background_requires_bound_fact")
-                continue
-            program_ceiling = claim_assertion_ceiling(
-                [evidence_by_key[key] for key in keys],
-                [fact_registry[fid] for fid in fact_ids if fid in fact_registry],
-            )
-            ceiling_explanation = compact_text(
-                source_claim.get("evidence_ceiling")
-                or " ".join(
-                    str(evidence_by_key[key].get("evidence_ceiling") or "")
-                    for key in keys
-                )
-                or "Do not generalize beyond the cited source evidence."
-            )
-            if source_claim.get("argument_basis") and (
-                program_ceiling != source_claim.get("assertion_ceiling")
-                or {r.get("evidence_key") for r in source_claim.get("evidence_refs") or []} - set(keys)
-            ):
-                reject("argument_premises_changed")
-                continue
-            coverage_report = claim_support_coverage(
-                {
-                    "proposition": claim_text,
-                    "source": source_claim.get("source"),
-                    "paper_ids": citation_group,
-                    "fact_ids": fact_ids,
-                    "coverage": dict(source_claim.get("coverage") or {}),
-                    "evidence_refs": [
-                        {"evidence_key": key} for key in keys
-                    ],
-                },
-                evidence_texts=[
-                    " ".join(
-                        str(value or "")
-                        for value in (
-                            evidence_by_key[key].get("content")
-                            or evidence_by_key[key].get("evidence")
-                            or "",
-                            evidence_by_key[key].get("normalized_fact_value") or "",
-                        )
-                    )
-                    for key in keys
-                ],
-                available_fact_ids=fact_ids,
-                evidence_paper_ids=[
-                    evidence_by_key[key].get("paper_id") for key in keys
-                ],
-            )
-            if (
-                support_status == "supported"
-                and coverage_report["support_status"] != "supported"
-            ):
-                support_status = "partially_supported"
-            claim_plans.append(
-                {
-                    "claim_id": claim_id,
-                    "paragraph_id": paragraph_id,
-                    "sequence": len(paragraph_claim_ids) + 1,
-                    "claim": claim_text,
-                    "claim_kind": claim_kind,
-                    "synthesis_subtype": compact_text(
-                        source_claim.get("synthesis_subtype"), limit=80
-                    ),
-                    "epistemic_status": epistemic_status,
-                    "support_status": support_status,
-                    "citation_group": citation_group,
-                    "evidence_refs": evidence_refs,
-                    "fact_ids": fact_ids,
-                    "allowed_assertion": compact_text(
-                        source_claim.get("allowed_assertion"), limit=4000
-                    )
-                    or " ".join(normalized_fact_values)
-                    or claim_text,
-                    "fact_binding_status": (
-                        "explicit_fact_selection"
-                        if requested_fact_ids
-                        else "source_bounded_context"
-                    ),
-                    "assertion_ceiling": program_ceiling,
-                    "ceiling_explanation": ceiling_explanation,
-                    "evidence_ceiling": ceiling_explanation,
-                    "semantic_constraints": list(dict.fromkeys([
-                        *(source_claim.get("semantic_constraints") or []),
-                        "Do not introduce uncited quantitative, causal, or mechanistic detail.",
-                        "Preserve source attribution and the declared evidence ceiling.",
-                    ])),
-                    "coverage": coverage_report["coverage"],
-                    "failed_coverage_fields": coverage_report[
-                        "failed_coverage_fields"
-                    ],
-                }
-            )
-            claim_plans[-1].update(argument_projection(source_claim))
-            claim_plans[-1]["required_for_section"] = source_claim.get("required_for_section", True)
-            paragraph_claim_ids.append(claim_id)
-            if enforce_declared_claims:
-                assigned_declared_claim_ids.add(claim_id)
-            paragraph_papers.extend(citation_group)
-            covered_primary.update((direct_claim_papers(claim_plans[-1], evidence_by_key, fact_registry)
-                                    if retrieval_mode == "lexical" else set(citation_group)) & set(primary))
-        if not paragraph_claim_ids:
-            continue
-        argument_role = compact_text(
-            raw_paragraph.get("argument_role"), limit=80
-        ).casefold()
-        paragraph_claim_kinds = {
-            str(claim.get("claim_kind") or "")
-            for claim in claim_plans
-            if claim.get("claim_id") in paragraph_claim_ids
-        }
-        argument_role = canonical_argument_role(
-            argument_role,
-            claim_kinds=paragraph_claim_kinds,
-            paper_count=len(set(paragraph_papers)),
-            paragraph_index=paragraph_index - 1,
-            paragraph_count=len(raw_paragraphs),
-            section_role=role,
-        )
-        knowledge_refs = [
-            f"synthesis_state:{component['component_type']}:{component['component_id']}"
-            for component in components
-            if component.get("status") == "supported"
-        ]
-        paragraph_plans.append(
-            {
-                "paragraph_id": paragraph_id,
-                "theme": compact_text(raw_paragraph.get("theme")),
-                "argument_role": argument_role,
-                "objective": compact_text(raw_paragraph.get("objective")),
-                "target_words": {
-                    "min": CASE_PARAGRAPH_MIN_WORDS,
-                    "max": CASE_PARAGRAPH_MAX_WORDS,
-                },
-                "primary_papers": [
-                    paper_id for paper_id in dict.fromkeys(paragraph_papers)
-                    if paper_id in primary
-                ],
-                "supporting_papers": [
-                    paper_id for paper_id in dict.fromkeys(paragraph_papers)
-                    if paper_id in supporting
-                ],
-                "paper_ids": list(dict.fromkeys(paragraph_papers)),
-                "opening_function": "Advance from the preceding analytical question.",
-                "closing_function": "State the evidence boundary and next implication.",
-                "reader_takeaway": compact_text(raw_paragraph.get("reader_takeaway")),
-                "positive_synthesis": compact_text(raw_paragraph.get("positive_synthesis")),
-                "caveat_policy": "diagnostic_only",
-                "knowledge_component_refs": knowledge_refs,
-                "claim_ids": paragraph_claim_ids,
-            }
-        )
-    if not paragraph_plans and strict:
-        raise RuntimeError(f"The academic planner produced no supported paragraph for {section_id}.")
-    # Filtering unsupported paragraphs must not turn a surviving experiment
-    # into an introduction. Missing responsibilities are repaired
-    # explicitly; position alone is not proof of a paragraph's function.
-    # Repairs append new paragraphs to preserve all existing claim IDs. Order
-    # their presentation only after assigning IDs, without rewriting content.
-    paragraph_plans.sort(key=lambda item: {
-        "section_frame": 0, "section_synthesis_exit": 2,
-    }.get(item["argument_role"], 1))
-    missing_primary = [paper_id for paper_id in primary if paper_id not in covered_primary]
-    missing_declared_claim_ids = [
-        claim_id
-        for claim_id in declared_by_id
-        if claim_id not in assigned_declared_claim_ids and declared_by_id[claim_id].get("required_for_section", True)
-    ]
-    if missing_primary and strict:
-        raise RuntimeError(
-            f"The academic planner did not route every writeable primary paper into a supported Claim for {section_id}: "
-            + ", ".join(missing_primary)
-        )
-    if missing_declared_claim_ids and strict:
-        raise RuntimeError(
-            f"The academic planner omitted registered Blueprint Claims for {section_id}: "
-            + ", ".join(missing_declared_claim_ids)
-        )
-    synthesis_section = {
-        "section_id": section_id,
-        "summary": compact_text(generated.get("synthesis_summary")),
-        "components": components,
-        "normalization_diagnostics": {
-            "rejected_claims": rejected_claims,
-            "proposed_claim_count": sum(len(p.get("claims") or []) for p in raw_paragraphs),
-            "accepted_claim_count": len(claim_plans),
-            "missing_primary_papers": missing_primary,
-            "missing_blueprint_claim_ids": missing_declared_claim_ids,
-            "missing_blueprint_claims": [
-                declared_by_id[claim_id]
-                for claim_id in missing_declared_claim_ids
-            ],
-            "unsupported_components": [item["component_type"] for item in components if item["status"] != "supported"],
-        },
-    }
-    writing_section = {
-        "section_id": section_id,
-        "section_role": role,
-        "route": "A" if len(paragraph_plans) == 1 else "B",
-        "overview_intent": compact_text(generated.get("overview_intent")),
-        "paragraphs": paragraph_plans,
-        "claims": claim_plans,
-        "depth_contract": dict(depth_contract or {}),
-    }
-    writing_section["narrative_diagnostics"] = derive_narrative_diagnostics(
-        writing_section,
-        depth_contract,
-    )
-    return synthesis_section, writing_section
 
 
 def validate_and_realize_section(
@@ -1529,6 +994,18 @@ def recover_evidence_section(task, package, evidence, citation_map, reason, decl
         "writing": {"section_id": sid, "paragraphs": [], "claims": []}}
 
 
+def section_contribution_guides(task, rows, topic):
+    """Do not change historical paid requests when adding source-aware guides."""
+    current = task.get("reading_strategy") == REVIEW_READING_STRATEGY
+    guides = {pid: contribution_context(rows.get(pid, {}).get("paper_analysis"), limit=300,
+                                       review_topic=topic if current else None)
+              for pid in task.get("allowed_papers") or []}
+    if not current:
+        for guide in guides.values():
+            guide.pop("evidence_keys", None)
+    return guides
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate review sections with an OpenAI-compatible writing model.")
     parser.add_argument("--review-root", default=".")
@@ -1576,6 +1053,8 @@ def main() -> int:
     # Compatibility only: standalone conclusions are composed in Draft.
     tasks = [t for t in read_json(stage / "section_tasks.json")
              if str(t.get("section_role") or "").casefold() != "conclusion"]
+    if any(section_audit_mode(task, audit_mode) == "full" for task in tasks):
+        audit_mode = "full"
     evidence_package_path = stage / "section_evidence.json"
     evidence_package = (
         read_json(evidence_package_path)
@@ -1598,6 +1077,12 @@ def main() -> int:
     selected_outline = selected_outline_path.read_text(encoding="utf-8", errors="ignore")[:12000] if selected_outline_path.exists() else ""
     rules = load_blueprint_rule_pack(root, blueprint)
     synthesis_rules = load_cross_study_synthesis_skill()
+    authoring_settings = checkpoint_authoring_settings(checkpoint, project_id=args.project_id,
+        rules=rules, synthesis_rules=synthesis_rules)
+    rules, synthesis_rules = authoring_settings["rules"], authoring_settings["synthesis_rules"]
+    # Project guidance is an input, not a frozen application rule-pack resource.
+    from review_writer_core.reference_writing_style import reference_style_prompt
+    rules += reference_style_prompt(blueprint.get("writing_style"))
     section_signatures = section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, {
         "model": model, "base_url": base_url, "wire_api": wire_api,
         "authoring_version": AUTHORING_VERSION, "audit_mode": audit_mode, "fact_routing_contract": FACT_ROUTING_CONTRACT,
@@ -1619,10 +1104,14 @@ def main() -> int:
     if not isinstance(checkpoint_entries, dict):
         checkpoint_entries = {}
     checkpoint_entries, input_rejections = matching_section_inputs(checkpoint_entries, section_signatures,
-        legacy_validated=checkpoint.get("generation_fingerprint") == generation_fingerprint
-            or checkpoint.get("resume_validated") is True)
+        # Legacy entries without per-section fingerprints are reusable only
+        # when the complete generation input is identical. A stale worker-side
+        # ID-only validation must never bless prose for a changed topic.
+        legacy_validated=checkpoint.get("generation_fingerprint") == generation_fingerprint)
+    check_historical_resume(checkpoint, section_signatures, project_id=args.project_id,
+                            rejected_entries=input_rejections)
     checkpoint_entries, rejected_checkpoints = reusable_section_entries(
-        checkpoint_entries, tasks, evidence_sections
+        checkpoint_entries, tasks, checkpoint_supplement_sections(evidence_sections, checkpoint)
     )
     rejected_checkpoints = {**input_rejections, **rejected_checkpoints}
     for sid, entry in checkpoint_entries.items():
@@ -1645,6 +1134,7 @@ def main() -> int:
                 "task_ids": task_ids, "generation_fingerprint": generation_fingerprint,
                 "entries": checkpoint_entries, "rejected_entries": rejected_checkpoints,
                 "authoring_states": authoring_states,
+                "authoring_settings": authoring_settings,
                 "failed_sections": failed_progress,
             })
     def persist_authoring(sid, value):
@@ -1854,18 +1344,27 @@ def main() -> int:
             writing_section, generated_draft, source_review = write_from_sources(
                 section_id=section_id, task=task, evidence=evidence, prompt_evidence=plan_evidence, domain_terms=domain_terms, responsibilities=responsibilities,
                 audit_mode=audit_mode, resume_state=deepcopy(authoring_states.get(section_id, {}).get("state")),
+                citation_format=authoring_settings["citation_format"],
+                paragraph_plan=build_paragraph_plan(spec),
+                retrieve_evidence=evidence_mailbox(os.environ.get("REVIEW_SECTION_EVIDENCE_MAILBOX"), section_id),
                 save_state=lambda value: persist_authoring(section_id, value),
                 context=("Topic: " + str(blueprint.get("review_topic") or project.name) + "\n"
                     + writing_scope_prompt_block(writing_scope_contract, stage="drafting") + "\n"
-                    + section_constraint_prompt_block(task) + "\nConfirmed outline:\n" + selected_outline
+                    + "\nConfirmed outline:\n" + selected_outline
                     + "\nWriting rules:\n" + rules + "\n" + synthesis_rules
                     + "\nPaper contribution guides (navigation, not verified conclusions):\n"
-                    + json.dumps({pid: contribution_context(rows.get(pid, {}).get("paper_analysis"), limit=300)
-                                  for pid in task.get("allowed_papers") or []}, ensure_ascii=False)
+                    + json.dumps(section_contribution_guides(task, rows,
+                                  str(blueprint.get("review_topic") or "")), ensure_ascii=False)
                     + "\nCompleted dependencies (context, not additional source evidence):\n" + json.dumps(task.get("dependency_context", []), ensure_ascii=False)), call=source_call)
-            if source_review.get("unresolved"):
+            # A single withheld claim must not discard a chapter that still has
+            # source-supported prose; the limited-evidence mode already records
+            # the gap. Only a chapter with nothing publishable is a retryable failure.
+            if source_review.get("unresolved") and not writing_section.get("paragraphs"):
                 return failure(section_id, str(task.get("heading") or section_id),
                     "Source checking is incomplete. Draft and check state were preserved; retry this section after reviewing its evidence.")
+            # New passages belong to a local revision, not the already-paid
+            # source-writing input or its checkpoint fingerprint.
+            evidence = [*evidence, *((source_review.get("evidence_supplement") or {}).get("evidence") or [])]
             if not writing_section["paragraphs"]:
                 malformed = any(row.get("reason") in {
                     "invalid_paragraph", "invalid_claim", "missing_or_invalid_source_span", "invalid_result_context"
@@ -1909,14 +1408,8 @@ def main() -> int:
                 [overview, *(str(item.get("text") or "") for item in paragraphs)]
             )
         )
-        minimum_word_count = int(
-            depth_contract.get("target_word_min")
-            or target_word_floor(spec.get("target_words"))
-            or 0
-        )
-        depth_sufficient = bool(
-            not minimum_word_count or actual_word_count >= minimum_word_count * 0.9
-        )
+        minimum_word_count = 0  # Length is descriptive, not scientific readiness.
+        depth_sufficient = True
         planning_repair = (
             dict(synthesis_section.get("planning_contract_repair") or {})
             if isinstance(synthesis_section, dict)
@@ -1973,6 +1466,25 @@ def main() -> int:
                 "repair_candidates": [],
                 "planning_proposals": [],
             }
+        # Why a section needed a second pass, kept as a compact reason histogram
+        # so the extra model calls can be attributed without replaying prompts.
+        output["repair_diagnostics"] = {
+            "mapping_repair_attempted": bool(source_review.get("mapping_repair_attempted")),
+            "mapping_repair": source_review.get("mapping_repair_diagnostics") or {},
+            "content_repair_attempted": bool(source_review.get("content_repair_attempted")),
+            "style_repair_attempted": bool(source_review.get("style_repair_attempted")),
+            "omitted_reasons": sorted({
+                str(row.get("reason") or "") for row in (source_review.get("omitted") or [])
+                if isinstance(row, dict) and row.get("reason")
+            }),
+            "prose_issue_count": len(source_review.get("prose_issues") or []),
+            "record_issue_count": len(source_review.get("record_issues") or []),
+            "binding_repair_count": len(source_review.get("binding_repairs") or []),
+            "remaining_style_finding_count": len(source_review.get("remaining_style_findings") or []),
+            "written_claim_count": source_review.get("written_claim_count"),
+            "checked_claim_count": source_review.get("checked_claim_count"),
+        }
+        output["content_records"] = paragraph_records(paragraphs, writing_section)
         if generation_mode == "limited_evidence":
             record = resolution_record(section_evidence, pending=False, reason=fallback_reason)
             output["evidence_resolution"] = record

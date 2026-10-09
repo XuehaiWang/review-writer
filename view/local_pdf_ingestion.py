@@ -243,6 +243,100 @@ def _duplicate_for_digest(rows: list[tuple[Path, dict[str, Any]]], digest: str) 
     return None
 
 
+def _metadata_value(metadata: dict[str, Any], key: str) -> Any:
+    field = metadata.get(key)
+    if isinstance(field, dict) and "value" in field:
+        return field.get("value")
+    return field
+
+
+def _normalized_doi(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    text = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", text)
+    return text.removeprefix("doi:").strip().rstrip(".,;)")
+
+
+def _normalized_title_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").casefold())
+
+
+def _metadata_first_author(metadata: dict[str, Any]) -> str:
+    authors = _metadata_value(metadata, "authors")
+    if not isinstance(authors, list) or not authors:
+        return ""
+    first = authors[0]
+    if isinstance(first, dict):
+        first = first.get("name") or " ".join(
+            part for part in (first.get("given"), first.get("family")) if part
+        )
+    return _normalized_title_key(first)
+
+
+def _metadata_year(metadata: dict[str, Any]) -> str:
+    match = _YEAR_RE.search(str(_metadata_value(metadata, "year") or ""))
+    return match.group(0) if match else ""
+
+
+_BOILERPLATE_TITLES = frozenset(
+    {
+        "abstract",
+        "acknowledgement",
+        "acknowledgements",
+        "acknowledgment",
+        "acknowledgments",
+        "conclusion",
+        "conclusions",
+        "contents",
+        "experimentalsection",
+        "frontmatter",
+        "graphicalabstract",
+        "introduction",
+        "keywords",
+        "references",
+        "supportinginformation",
+        "tableofcontents",
+    }
+)
+
+
+def _duplicate_for_identity(
+    rows: list[tuple[Path, dict[str, Any]]],
+    *,
+    doi: str,
+    title: str,
+    first_author: str,
+    year: str,
+) -> dict[str, Any] | None:
+    """Find one publication that arrived as two different PDF files.
+
+    A matching DOI alone is not enough — legacy rows can carry a wrong DOI — and
+    a matching title alone is not enough — titles repeat across papers.  Require
+    both, or a title plus the first author and year when no DOI is available.
+    """
+
+    title_key = _normalized_title_key(title)
+    if len(title_key) < 12 or title_key in _BOILERPLATE_TITLES:
+        return None
+    wanted_doi = _normalized_doi(doi)
+    wanted_author = _normalized_title_key(first_author)
+    for _, metadata in rows:
+        if _normalized_title_key(_metadata_value(metadata, "title")) != title_key:
+            continue
+        existing_doi = _normalized_doi(_metadata_value(metadata, "doi"))
+        if wanted_doi and existing_doi:
+            if existing_doi == wanted_doi:
+                return metadata
+            continue
+        if (
+            wanted_author
+            and year
+            and _metadata_first_author(metadata) == wanted_author
+            and _metadata_year(metadata) == str(year)
+        ):
+            return metadata
+    return None
+
+
 def _rebuild_registry(review_root: Path) -> None:
     scripts = (
         Path(__file__).resolve().parents[1]
@@ -604,6 +698,29 @@ def ingest_local_pdf(review_root: Path, original_filename: object, staged_pdf: P
                 duplicate,
                 root,
             )
+            same_publication = _duplicate_for_identity(
+                rows,
+                doi=_normalized_doi(_metadata_value(metadata, "doi")),
+                title=_metadata_value(metadata, "title"),
+                first_author=_metadata_first_author(metadata),
+                year=_metadata_year(metadata),
+            )
+            if same_publication is not None and str(
+                same_publication.get("paper_id") or ""
+            ) != str(paper_id):
+                _remove_mineru_artifacts(root, slug)
+                if created_pdf:
+                    final_pdf.unlink(missing_ok=True)
+                return {
+                    "status": "duplicate_publication",
+                    "paper_id": same_publication.get("paper_id"),
+                    "filename": filename,
+                    "sha256": digest,
+                    "message": (
+                        "This paper is already registered in Library from a different "
+                        "PDF file."
+                    ),
+                }
             title_field = metadata.get("title") or {}
             title = str(
                 title_field.get("value")

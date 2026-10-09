@@ -162,8 +162,10 @@ def build_inventory(review_root: Path, project_id: str) -> dict[str, Any]:
                         else ""
                     )
                     caption = block_caption(block)
-                    missing_caption = "source_caption_missing" in caption_fields({"source_caption_text": caption})["caption_quality"]["warnings"]
-                    recovered = recover_caption(blocks, idx - 1, markdown=markdown, pdf_path=pdf_path) if missing_caption else {}
+                    caption_quality = caption_fields({"source_caption_text": caption})["caption_quality"]
+                    incomplete_caption = ("source_caption_missing" in caption_quality["warnings"]
+                                          or caption_quality.get("word_count", 0) <= 4)
+                    recovered = recover_caption(blocks, idx - 1, markdown=markdown, pdf_path=pdf_path) if incomplete_caption else {}
                     source_type = str(block.get("type") or "")
                     candidates.append(
                         {

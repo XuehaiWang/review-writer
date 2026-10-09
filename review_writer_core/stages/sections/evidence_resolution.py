@@ -1,8 +1,48 @@
 """Explicit incomplete evidence outcomes, shared by generation and publication."""
 import hashlib
 import json
+from copy import deepcopy
 
 CONTRACT = "section-evidence-resolution/1"
+BASE_HIT_KEYS = "supplement_base_hit_keys"
+
+
+def merge_supplement_evidence(package, evidence):
+    """Append host-validated sources without changing the frozen base identity.
+
+    This is not source validation: API callers must resolve supplemental rows
+    against their owned, frozen source manifest before calling this helper.
+    Keep base keys so old paid outputs can be checked against the exact base
+    projection, not a blindly trusted saved hash.
+    """
+    result = deepcopy(package)
+    hits = result.setdefault("hits", [])
+    existing = {row["evidence_key"] for row in hits}
+    added = []
+    for row in evidence:
+        key = row["evidence_key"]
+        if key not in existing:
+            added.append(deepcopy(row))
+            existing.add(key)
+    if added:
+        result.setdefault(BASE_HIT_KEYS, [row["evidence_key"] for row in hits])
+        result["hits"] = hits + added
+    return result
+
+
+def _matches_evidence_fingerprint(recorded, package):
+    if recorded == evidence_fingerprint(package):
+        return True
+    keys = package.get(BASE_HIT_KEYS)
+    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys):
+        return False
+    hits = package.get("hits") or []
+    by_key = {row.get("evidence_key"): row for row in hits}
+    if len(by_key) != len(hits) or any(key not in by_key for key in keys):
+        return False
+    base = {key: value for key, value in package.items() if key != BASE_HIT_KEYS}
+    base["hits"] = [by_key[key] for key in keys]
+    return recorded == evidence_fingerprint(base)
 
 
 def evidence_fingerprint(package):
@@ -26,7 +66,7 @@ def has_evidence_resolution(output, package):
     record = output.get("evidence_resolution") or {}
     return (record.get("contract") == CONTRACT
             and record.get("status") in {"pending_evidence", "limited_evidence"}
-            and record.get("evidence_fingerprint") == evidence_fingerprint(package)
+            and _matches_evidence_fingerprint(record.get("evidence_fingerprint"), package)
             and output.get("generation_mode") == record["status"]
             and bool(record.get("reason")))
 

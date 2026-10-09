@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
-import time
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from review_writer_api.domain_services.drafts import (
-    DRAFT_DOCUMENT,
-    DRAFT_QUALITY,
     SECTION_EVIDENCE,
     DraftsService,
 )
@@ -19,6 +16,46 @@ from review_writer_api.workflow_models import WorkflowApproval
 
 
 class DraftsV1Tests(NativeFigureApiTestCase):
+    def test_writer_records_survive_assembly_but_not_manual_changes(self):
+        from review_writer_core.manuscript_coherence import paragraph_records, assembly_records
+
+        # Inject source records at the assembly boundary, without touching real
+        # accounts or requiring any provider request.
+        def with_records(paragraphs, sections):
+            for section in sections:
+                section['content_records'] = paragraph_records(section['paragraphs'], {
+                    'paragraphs': [dict(p, reader_takeaway='Bounded source result', evidence_uses=[])
+                                   for p in section['paragraphs']]})
+            return assembly_records(paragraphs, sections)
+
+        with TestClient(self.app) as client:
+            with patch('review_writer_api.domain_services.drafts.assembly_records', side_effect=with_records):
+                self.prepare_draft(client)
+            base = f'/api/v1/projects/{self.project_id}/draft'
+            before = client.get(base).json()
+            self.assertTrue(before['content_records'])
+            pid = next(iter(before['content_records']))
+            paragraph = next(p for p in before['paragraphs'] if p['paragraph_id'] == pid)
+            changed = client.put(base + '/paragraphs/' + pid, json={
+                'revision': before['revision'], 'text': paragraph['text'] + ' User clarification.',
+                'base_text_sha256': paragraph['text_sha256']})
+            self.assertEqual(200, changed.status_code, changed.text)
+            after = client.get(base).json()
+            self.assertNotIn(pid, after['content_records'])
+            self.assertEqual(set(before['content_records']) - {pid}, set(after['content_records']))
+
+    def test_draft_exposes_nonblocking_repetition_clues_for_current_paragraphs(self):
+        with TestClient(self.app) as client:
+            self.prepare_draft(client)
+            payload = client.get(f"/api/v1/projects/{self.project_id}/draft").json()
+        report = payload["narrative_repetition"]
+        self.assertEqual("complete", report["status"])
+        self.assertEqual("surface_clues_v1", report["method"])
+        self.assertEqual(len(payload["paragraphs"]), report["total_paragraph_count"])
+        self.assertEqual(len(payload["paragraphs"]), report["covered_paragraph_count"])
+        self.assertIsInstance(report["hints"], list)
+        self.assertNotIn("narrative_repetition", payload.get("quality") or {})
+
     def test_empty_paragraph_deletes_only_prose_and_preserves_history(self):
         with TestClient(self.app) as client:
             self.prepare_draft(client)

@@ -17,13 +17,14 @@ conditions, numbers, and units. Distinguish reported results, authors'
 interpretations, and review-level inferences. Abstract-only sources support
 broad attributed framing, not detailed quantitative or mechanistic claims.
 
-For each synthesis unit, prefer this order when the supplied sources permit:
-
-1. State the common pattern or shared scientific result.
-2. Compare genuinely commensurable differences across two or more studies.
-3. Relate those differences to reported conditions, design, or mechanism evidence.
-4. Identify supported exceptions and applicability boundaries.
-5. Explain the practical or research implication without extending beyond the sources.
+Choose the organization that explains this section's scientific question.
+Shared patterns, differences, mechanisms, exceptions and implications are possible
+analytical moves, not a five-step sequence to repeat in every synthesis unit.
+A single bounded contribution may need only a short explanation. Multiple works
+may be connected by a documented problem, design difference or development;
+their presence together does not establish a progression or shared mechanism.
+Use the caller's shared contribution and section-thread policies for example
+selection and paragraph responsibilities rather than adding another template.
 
 Do not create a cross-study ranking from one paper. Do not directly compare
 metrics measured under incompatible definitions or conditions. State evidence

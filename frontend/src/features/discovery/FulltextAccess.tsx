@@ -3,6 +3,12 @@ import type { DiscoveryRow } from "./model/discoveryModel";
 
 type Text = (zh: string, en: string) => string;
 
+function canTryAutoDownload(row: DiscoveryRow): boolean {
+  // The worker resolves a DOI or a licensed Crossref PDF. A bare PDF URL
+  // remains a direct/manual download option, not a promise of auto-import.
+  return Boolean(row.doi || (row.crossref_pdf_url && Array.isArray(row.license_urls) && row.license_urls.length));
+}
+
 export function articleSourceUrl(row: DiscoveryRow): string {
   for (const raw of [row.landing_url, row.url, row.pdf_url]) {
     try {
@@ -26,7 +32,9 @@ export function fulltextLabel(row: DiscoveryRow, text: Text): string {
     case "unknown": return text("暂时无法确认能否下载", "Download availability uncertain");
   }
   if (row.fulltext_access?.state === "not_acquired") return text("暂未获取全文", "Full text not acquired");
-  if (row.access_status === "open_access_downloadable" || row.pdf_url) return text("开放全文线索 · 可尝试下载", "Open full-text lead · try download");
+  if (row.access_status === "open_access_downloadable" || row.pdf_url) return canTryAutoDownload(row)
+    ? text("开放全文线索 · 可尝试下载", "Open full-text lead · try download")
+    : text("开放全文线索 · 请打开核对", "Open full-text lead · open to verify");
   return text("全文获取待确认", "Full-text access unverified");
 }
 
@@ -53,14 +61,14 @@ export function fulltextHint(row: DiscoveryRow, text: Text): string {
   return text("开放标记或链接尚未验证；只有取得有效全文后才能用于全文分析。", "Open-access flags and links are unverified; full-text analysis requires a valid acquired document.");
 }
 
-export function FulltextAccess({ row, processing = false, disabled = false, showStatus = true, libraryUrl, onDownload }: {
-  row: DiscoveryRow; processing?: boolean; disabled?: boolean; showStatus?: boolean; libraryUrl: string; onDownload: () => void;
+export function FulltextAccess({ row, processing = false, disabled = false, disabledReason, showStatus = true, libraryUrl, onDownload }: {
+  row: DiscoveryRow; processing?: boolean; disabled?: boolean; disabledReason?: string; showStatus?: boolean; libraryUrl: string; onDownload: () => void;
 }) {
   const { text } = useUiText();
   const current = processing ? { ...row, fulltext_access: { state: "acquiring" as const, reason: "" } } : row;
   const url = articleSourceUrl(row);
   const acquired = row.fulltext_access?.state === "downloaded" || row.access_status === "downloaded_to_library";
-  const searchable = Boolean(row.doi || row.pdf_url || row.access_status === "open_access_downloadable");
+  const searchable = canTryAutoDownload(row);
   return <div className="discovery-fulltext" onClick={(event) => event.stopPropagation()}>
     {showStatus ? <span className={`fulltext-badge ${acquired || row.availability?.state === "available" ? "available" : "pending"}`} role="status">{fulltextLabel(current, text)}</span> : null}
     <p>{fulltextHint(current, text)}</p>
@@ -72,5 +80,6 @@ export function FulltextAccess({ row, processing = false, disabled = false, show
       {url ? <a className="button button-secondary" href={url} target="_blank" rel="noopener noreferrer">{text("打开原文", "Open article")}</a> : null}
       <a className="button button-ghost" href={libraryUrl}>{acquired ? text("查看文献库", "View library") : text("上传 PDF", "Upload PDF")}</a>
     </div>
+    {disabled && !processing && disabledReason ? <small role="status">{disabledReason}</small> : null}
   </div>;
 }

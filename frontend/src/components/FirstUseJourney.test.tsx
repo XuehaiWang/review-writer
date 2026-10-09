@@ -71,9 +71,11 @@ describe("first-use and returning-user safeguards", () => {
     const view = render(<ProjectsPage />, { wrapper });
     expect(screen.getByRole("combobox", { name: /^分类配置/ })).toHaveValue("chemistry_general");
     fireEvent.change(screen.getByLabelText("研究主题"), { target: { value: "unsaved topic" } });
+    expect(screen.queryByRole("button", { name: /清空未提交内容|Discard unsent inputs/ })).not.toBeInTheDocument();
     view.unmount();
     render(<ProjectsPage />, { wrapper });
     expect(screen.getByLabelText("研究主题")).toHaveValue("unsaved topic");
+    expect(screen.queryByRole("button", { name: /清空未提交内容|Discard unsent inputs/ })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "继续项目" })).toHaveAttribute("href", "/draft?project=existing");
   });
 });

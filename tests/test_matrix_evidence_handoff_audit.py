@@ -228,8 +228,14 @@ def test_abstract_summary_can_be_background_but_not_direct_claim_evidence():
 
 
 @pytest.mark.parametrize("status", ["rejected", "pending", "uncertain", "unavailable"])
-def test_unverified_facts_remain_excluded(status):
-    assert package([make_fact(verification={"status": status})])["hits"] == []
+def test_unverified_facts_are_navigation_or_excluded(status):
+    hits = package([make_fact(verification={"status": status})])["hits"]
+    if status in {"rejected", "unavailable"}:
+        assert hits == []
+    else:
+        assert len(hits) == 1
+        assert not hits[0]["claim_eligible"]
+        assert hits[0]["background_eligible"]
 
 
 @pytest.mark.parametrize("ref_change", [

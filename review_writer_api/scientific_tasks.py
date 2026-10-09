@@ -17,6 +17,11 @@ from review_writer_core.bibliography_agent import (
     bounded_bibliography_regions,
     validate_bibliography_agent_result,
 )
+from review_writer_core.abstract_extraction import (
+    OPENING_ABSTRACT_INSTRUCTION,
+    build_opening_candidates,
+    recover_opening_abstract,
+)
 from review_writer_core.publication_metadata import (
     front_matter_text,
     read_pdf_first_page_text,
@@ -150,7 +155,7 @@ def download(args: argparse.Namespace) -> int:
         state = str(result.get("status") or "")
         if state == "downloaded":
             added += 1
-        elif state in {"already_in_library", "duplicate_file"}:
+        elif state in {"already_in_library", "duplicate_file", "duplicate_publication"}:
             already += 1
         else:
             failed += 1
@@ -193,7 +198,18 @@ def publication_date_extract(args: argparse.Namespace) -> int:
         pdf_first_page_text=pdf_first_page,
         filename=args.filename,
     )
-    model_needed = str(deterministic.get("status") or "") != "reliable"
+    # Only when the deterministic reader found no abstract do we spend prompt
+    # space (and, if the date is already reliable, a model request) asking for one.
+    opening_candidates = (
+        build_opening_candidates(markdown, pdf_first_page)
+        if bool(getattr(args, "abstract_missing", False))
+        else []
+    )
+    # The model is a bounded ambiguity resolver, never the primary extractor:
+    # ask it only when the deterministic pass produced no year at all, or when an
+    # abstract is missing and the model alone can quote one.
+    local_year = (deterministic.get("basic_info") or {}).get("publication_year")
+    model_needed = (not local_year) or bool(opening_candidates)
     if gateway_configured() and model_needed:
         prompt = """You extract bibliographic publication dates from an academic paper.
 
@@ -221,12 +237,18 @@ Rules:
 - date_type must be one of published_online, issue_date, published, early_view,
   accepted, received, copyright, unknown.
 - If no reliable formal publication evidence exists, use null values, unknown, and low confidence.
+""" + (OPENING_ABSTRACT_INSTRUCTION if opening_candidates else "") + """
 
 UNTRUSTED_SOURCES_BEGIN
 """ + json.dumps(
             {
                 "pdf_page_1": pdf_first_page,
                 "mineru_markdown_front_matter": markdown_front,
+                **(
+                    {"opening_candidate_windows": opening_candidates}
+                    if opening_candidates
+                    else {}
+                ),
             },
             ensure_ascii=False,
         ) + "\nUNTRUSTED_SOURCES_END"
@@ -255,6 +277,12 @@ UNTRUSTED_SOURCES_BEGIN
     )
     result["model_attempted"] = bool(gateway_configured() and model_needed)
     result["model_needed"] = model_needed
+    recovered = recover_opening_abstract(
+        (model_payload or {}).get("abstract_recovery"),
+        opening_candidates,
+    )
+    if recovered:
+        result["abstract_recovery"] = recovered
     _write(args.output, result)
     return 0
 
@@ -325,6 +353,11 @@ def parse_args() -> argparse.Namespace:
     publication_parser.add_argument("--pdf", type=Path, required=True)
     publication_parser.add_argument("--markdown", type=Path, required=True)
     publication_parser.add_argument("--filename", default="")
+    publication_parser.add_argument(
+        "--abstract-missing",
+        action="store_true",
+        help="Also ask the model to quote an unlabelled opening abstract.",
+    )
     publication_parser.add_argument("--output", type=Path, required=True)
     role_parser = commands.add_parser("bibliography-role-extract")
     role_parser.add_argument("--markdown", type=Path, required=True)

@@ -3,10 +3,13 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from PIL import Image
 
@@ -16,6 +19,71 @@ SPEC = importlib.util.spec_from_file_location("redraw_figures", SCRIPT)
 assert SPEC and SPEC.loader
 redraw_figures = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(redraw_figures)
+
+
+class MonochromePaletteTests(unittest.TestCase):
+    """Every redrawn figure is greyscale by default; the switch restores the old look."""
+
+    def test_monochrome_prompt_drops_colour_instructions_and_adds_the_override(self) -> None:
+        figure = {"figure_id": "F1"}
+        source_prompt = redraw_figures.build_prompt(
+            "style", figure, "", redraw_figures.FIGURE_TYPE_COLORED, "source"
+        )
+        monochrome_prompt = redraw_figures.build_prompt(
+            "style", figure, "", redraw_figures.FIGURE_TYPE_COLORED, "monochrome"
+        )
+        # The previous behaviour is untouched...
+        self.assertIn("in its original colour", source_prompt)
+        self.assertIn("Retain colours only", source_prompt)
+        self.assertNotIn("PALETTE OVERRIDE", source_prompt)
+        # ...and the monochrome prompt neither keeps nor requests colour.
+        self.assertNotIn("in its original colour", monochrome_prompt)
+        self.assertNotIn("Retain colours only", monochrome_prompt)
+        self.assertIn("PALETTE OVERRIDE", monochrome_prompt)
+        # The scientific lock is unchanged either way.
+        for prompt in (source_prompt, monochrome_prompt):
+            self.assertIn("Treat the scientific layer as immutable", prompt)
+
+    def test_source_palette_leaves_the_prompt_exactly_as_before(self) -> None:
+        prompt = "a prompt"
+        self.assertEqual(prompt, redraw_figures.apply_palette(prompt, "source"))
+        self.assertTrue(redraw_figures.apply_palette(prompt, "monochrome").startswith(prompt))
+
+    def test_conversion_removes_every_chromatic_pixel_and_keeps_lightness(self) -> None:
+        with TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "output.png"
+            image = Image.new("RGB", (40, 30), "white")
+            for x in range(10, 30):
+                for y in range(10, 20):
+                    image.putpixel((x, y), (20, 150, 220))
+            image.putpixel((2, 2), (0, 0, 0))
+            image.save(image_path)
+            before = redraw_figures.chromatic_content_metrics(image_path)
+
+            conversion = redraw_figures.to_monochrome(image_path)
+            after = redraw_figures.chromatic_content_metrics(image_path)
+            check = redraw_figures.monochrome_palette_check(image_path)
+
+            with Image.open(image_path) as result:
+                self.assertEqual("L", result.mode)
+                pixel = result.convert("RGB").getpixel((20, 15))
+        self.assertGreater(before["chromatic_pixels"], 0)
+        self.assertEqual(0, after["chromatic_pixels"])
+        self.assertEqual("pass", check["status"], check)
+        # Luminance is preserved, so neutral antialiasing survives the conversion.
+        self.assertEqual((pixel[0], pixel[0], pixel[0]), pixel)
+        self.assertEqual(40, conversion["width"])
+
+    def test_the_palette_flag_defaults_to_monochrome_and_accepts_source(self) -> None:
+        environment = {key: value for key, value in os.environ.items()
+                       if key != "REVIEW_WRITER_FIGURE_PALETTE"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with mock.patch.object(sys, "argv", ["redraw", "--project-id", "p"]):
+                self.assertEqual("monochrome", redraw_figures.parse_args().palette)
+        with mock.patch.object(
+            sys, "argv", ["redraw", "--project-id", "p", "--palette", "source"]
+        ):
+            self.assertEqual("source", redraw_figures.parse_args().palette)
 
 
 class SourceFaithfulRenderTests(unittest.TestCase):

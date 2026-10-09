@@ -9,31 +9,73 @@ CONTRIBUTION_WRITING_POLICY = (
     "Contribution summaries are navigation, not independently verified evidence. Never infer priority "
     "or historical influence from publication order. Preserve counterexamples. "
     "Write new scientific prose organized around the question, not copied source sentences, translations "
-    "or synonym substitution. Preserve technical names, formulas, quantities and experimental scope. "
-    "Exact quotations belong only in evidence fields. Include detailed conditions only when they explain "
-    "the argument; other supported records may go into comparison tables."
+    "or synonym substitution. Preserve the meaning and experimental scope of details you choose to report; "
+    "this is not a requirement to reproduce every technical name, formula or quantity. Exact quotations "
+    "belong only in evidence fields. If a technical name or formula is visibly incomplete in the supplied "
+    "text, use a clearly supported intact occurrence; otherwise use an accurate broader description or "
+    "omit the nonessential detail. Never guess missing subscripts, identifiers or identities. If the "
+    "missing identity is essential to a comparison, qualify that comparison rather than fabricate precision."
 )
 
 SECTION_THREAD_POLICY = (
-    "Use one clear section thread: explain the question and organizing rationale, then order paragraph "
-    "tasks so each example advances it, and end with a supported answer or bounded uncertainty. "
-    "Chronology, structural differences, problem progression and strategy comparison are examples, "
-    "not a mandatory taxonomy or paragraph quota. Explain why adjacent examples belong together; "
-    "adding 'furthermore' is not a scientific transition. Do not invent mechanistic explanations, "
-    "comparability or historical dependence to connect paragraphs. Single-study cases and parallel "
-    "organization are legitimate. Do not repeat a limitations disclaimer at every paragraph ending."
+    "Write a chemistry review around the section question, not consecutive paper summaries or a "
+    "mechanical comparison checklist. Plans and paragraph tasks are provisional, mergeable navigation; "
+    "when absent, reason directly from the supplied evidence. Give each important experiment one main "
+    "explanatory place. Revisit it only to advance a distinct supported implication, without repeating "
+    "conditions and results. Keep the smallest sufficient set of numerical examples for the argument, "
+    "while retaining decisive exceptions, qualifications and explicit user-requested detail. "
+    "Use structure, chronology, mechanism or cross-study comparison only where the sources support that "
+    "relationship; a later date or a transition word cannot establish progress or causality. "
+    "Distinguish observations, source-author interpretations and bounded review inferences. "
+    "Sparse evidence may need one compact discussion rather than an introduction-comparison-limitations-recap "
+    "pattern. A closing summary is optional; omit it when it repeats the opening or examples. "
+    "Avoid habitual stock openings or endings such as 'Taken together' and repeated disclaimers. "
+    "Never expose internal labels such as fact cards or evidence packages in manuscript prose."
 )
 
 
-def contribution_context(analysis, *, limit=900):
+def contribution_context(analysis, *, limit=900, review_topic=None):
     """One compact navigation projection shared by planning and writing."""
     if not isinstance(analysis, dict):
         return {}
     result = {key: " ".join(str(analysis.get(key) or "").split())[:limit]
               for key in ("research_question", "contribution", "topic_relation")}
+    if review_topic is not None and " ".join(str(analysis.get("review_topic") or "").casefold().split()) != " ".join(str(review_topic).casefold().split()):
+        # A source reading is reusable across projects; its former project's
+        # relevance judgment is not. The planner derives that relation anew.
+        result["topic_relation"] = ""
     if not any(result.values()):
         return {}
-    return {**result, "usage": "navigation_only", "fact_ids": list(analysis.get("fact_ids") or [])}
+    return {**result, "usage": "navigation_only", "fact_ids": list(analysis.get("fact_ids") or []),
+            "evidence_keys": list(dict.fromkeys(key for key in analysis.get("evidence_keys") or []
+                                               if isinstance(key, str) and key))}
+
+
+def navigation_source_refs(row):
+    """Source locators for navigation, including unverified reading candidates.
+
+    This does not assert eligibility or ownership. Callers must check the
+    source belongs to this paper/user and resolve its current lineage before
+    exposing any source text. Never turn these refs into a verified binding.
+    """
+    analysis = row.get("paper_analysis") or {}
+    refs = list(analysis.get("evidence_refs") or [])
+    for fact in row.get("scientific_facts") or []:
+        if isinstance(fact, dict):
+            refs.extend(fact.get("evidence_refs") or [])
+    found = {}
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        key = str(ref.get("evidence_key") or "")
+        source_id = str(ref.get("source_file_id") or ref.get("paper_id") or row.get("paper_id") or "")
+        chunk_id = str(ref.get("chunk_id") or "")
+        lineage = str(ref.get("source_lineage_hash") or "")
+        if key and source_id and chunk_id and lineage:
+            found.setdefault(key, {**ref, "paper_id": str(row.get("paper_id") or source_id),
+                                   "source_file_id": source_id, "chunk_id": chunk_id,
+                                   "source_lineage_hash": lineage})
+    return list(found.values())
 
 
 def section_navigation_context(plan, paragraphs):

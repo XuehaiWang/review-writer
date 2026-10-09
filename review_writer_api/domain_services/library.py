@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import BoundedSemaphore
 from typing import Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from review_writer_api.billing import BillingService
@@ -43,7 +43,7 @@ from review_writer_api.scientific_runner import (
     ScientificRunner,
 )
 from review_writer_core.metadata_fields import unwrap_metadata_value
-from review_writer_core.abstract_extraction import extract_abstract
+from review_writer_core.abstract_extraction import abstract_value, extract_abstract
 from review_writer_core.metadata_quality import update_quality
 from review_writer_core.publication_metadata import read_pdf_first_page_text
 from review_writer_core.metadata_tags import verified_structured_tags
@@ -51,6 +51,7 @@ from review_writer_core.bibliography_audit import (
     BibliographyResolutionError,
     apply_bibliography_updates,
     bibliography_candidates,
+    bibliography_input_fingerprint,
     resolve_bibliography,
     refresh_edited_bibliography,
 )
@@ -963,6 +964,102 @@ class LibraryService:
             ):
                 shutil.rmtree(cleanup_resolved, ignore_errors=True)
 
+    def _publish_catalog_entry(
+        self,
+        principal: Principal,
+        session,
+        *,
+        user_uuid: uuid.UUID,
+        root: Path,
+        paper_id: str,
+        content_sha256: str,
+        filename: str,
+        title: str,
+        authors: list[Any],
+        keywords: list[Any],
+        tags: list[Any],
+        metadata: dict[str, Any],
+        pdf_source: Path,
+        markdown_source: Path,
+        duplicate: LibraryPaper | None,
+        new_outcome: str,
+        inserted_by_digest: dict[str, LibraryPaper] | None = None,
+    ) -> tuple[LibraryPaperRecord, str, dict[str, Any]]:
+        """Publish one validated triplet and create or restore its catalog row.
+
+        ``duplicate`` is the caller's already-queried row with the same content
+        digest and no active catalog entry (``None`` or a soft-deleted row).
+        Returns ``(record, outcome, stored_metadata)`` where ``outcome`` is
+        ``new_outcome`` or ``restored``.
+        """
+        occupied = None
+        if duplicate is None:
+            occupied = session.scalar(
+                select(LibraryPaper.id).where(
+                    LibraryPaper.user_id == user_uuid,
+                    LibraryPaper.paper_id == paper_id,
+                )
+            )
+        if duplicate is not None:
+            paper_id = duplicate.paper_id
+        elif occupied is not None or self._is_isolated_output(root, pdf_source):
+            paper_id = self._new_paper_id()
+        pdf_relative, markdown_relative, stored_metadata, artifact_rows = (
+            self._publish_library_triplet(
+                principal,
+                paper_id,
+                pdf_source=pdf_source,
+                markdown_source=markdown_source,
+                metadata=metadata,
+            )
+        )
+        session.add_all(artifact_rows)
+        if duplicate is None:
+            row = LibraryPaper(
+                user_id=user_uuid,
+                paper_id=paper_id,
+                content_sha256=content_sha256,
+                original_filename=filename,
+                title=title,
+                authors_json=authors,
+                keywords_json=keywords,
+                tags_json=tags,
+                metadata_json=stored_metadata,
+                pdf_relative_path=pdf_relative,
+                markdown_relative_path=markdown_relative,
+                status="active",
+            )
+            session.add(row)
+            outcome = new_outcome
+        else:
+            row = session.scalar(
+                select(LibraryPaper)
+                .where(LibraryPaper.id == duplicate.id)
+                .with_for_update()
+            )
+            if row is None:
+                raise MinerUPreciseParseFailed(
+                    "Deleted Library paper could not be restored."
+                )
+            row.original_filename = filename
+            row.title = title
+            row.authors_json = authors
+            row.keywords_json = keywords
+            row.tags_json = tags
+            row.metadata_json = stored_metadata
+            row.pdf_relative_path = pdf_relative
+            row.markdown_relative_path = markdown_relative
+            row.status = "active"
+            row.deleted_at = None
+            row.created_at = utc_now()
+            row.updated_at = utc_now()
+            outcome = "restored"
+        session.flush()
+        record = self._record(row)
+        if inserted_by_digest is not None:
+            inserted_by_digest[content_sha256] = row
+        return record, outcome, stored_metadata
+
     def _record_parsed_result(
         self,
         principal: Principal,
@@ -997,9 +1094,19 @@ class LibraryService:
             )
         except WorkflowValidationError as exc:
             raise MinerUPreciseParseFailed("MinerU metadata has an invalid paper_id.") from exc
+        title = str(
+            unwrap_metadata_value(metadata.get("title"))
+            or result.get("title")
+            or paper_id
+        )
+        authors = unwrap_metadata_value(metadata.get("authors")) or []
+        authors = authors if isinstance(authors, list) else [authors]
+        keywords = unwrap_metadata_value(metadata.get("keywords")) or []
+        keywords = keywords if isinstance(keywords, list) else [keywords]
+        tags = verified_structured_tags(metadata)
         try:
             with database_session(self.session_factory) as session:
-                reusable = session.scalar(
+                duplicate = session.scalar(
                     select(LibraryPaper)
                     .where(
                         LibraryPaper.user_id == user_uuid,
@@ -1007,91 +1114,29 @@ class LibraryService:
                     )
                     .with_for_update()
                 )
-                if reusable is not None and reusable.deleted_at is None:
-                    return self._record(reusable), "duplicate_file"
-                occupied = None
-                if reusable is None:
-                    occupied = session.scalar(
-                        select(LibraryPaper.id).where(
-                            LibraryPaper.user_id == user_uuid,
-                            LibraryPaper.paper_id == paper_id,
-                        )
-                    )
-                if reusable is not None:
-                    paper_id = reusable.paper_id
-                elif occupied is not None or self._is_isolated_output(
-                    root, pdf_source
-                ):
-                    paper_id = self._new_paper_id()
-                pdf_relative, markdown_relative, metadata, artifact_rows = (
-                    self._publish_library_triplet(
-                        principal,
-                        paper_id,
-                        pdf_source=pdf_source,
-                        markdown_source=markdown_source,
-                        metadata=metadata,
-                    )
+                if duplicate is not None and duplicate.deleted_at is None:
+                    return self._record(duplicate), "duplicate_file"
+                record, outcome, stored_metadata = self._publish_catalog_entry(
+                    principal,
+                    session,
+                    user_uuid=user_uuid,
+                    root=root,
+                    paper_id=paper_id,
+                    content_sha256=digest,
+                    filename=filename,
+                    title=title,
+                    authors=authors,
+                    keywords=keywords,
+                    tags=tags,
+                    metadata=metadata,
+                    pdf_source=pdf_source,
+                    markdown_source=markdown_source,
+                    duplicate=duplicate,
+                    new_outcome=str(result.get("status") or "uploaded"),
                 )
-                title = str(
-                    unwrap_metadata_value(metadata.get("title"))
-                    or result.get("title")
-                    or paper_id
+                self._write_compatibility_metadata(
+                    principal, record.paper_id, stored_metadata
                 )
-                authors = unwrap_metadata_value(metadata.get("authors")) or []
-                keywords = unwrap_metadata_value(metadata.get("keywords")) or []
-                tags = verified_structured_tags(metadata)
-                session.add_all(artifact_rows)
-                if reusable is None:
-                    row = LibraryPaper(
-                        user_id=user_uuid,
-                        paper_id=paper_id,
-                        content_sha256=digest,
-                        original_filename=filename,
-                        title=title,
-                        authors_json=(
-                            authors if isinstance(authors, list) else [authors]
-                        ),
-                        keywords_json=(
-                            keywords if isinstance(keywords, list) else [keywords]
-                        ),
-                        tags_json=tags,
-                        metadata_json=metadata,
-                        pdf_relative_path=pdf_relative,
-                        markdown_relative_path=markdown_relative,
-                        status="active",
-                    )
-                    session.add(row)
-                    outcome = str(result.get("status") or "uploaded")
-                else:
-                    row = session.scalar(
-                        select(LibraryPaper)
-                        .where(LibraryPaper.id == reusable.id)
-                        .with_for_update()
-                    )
-                    if row is None:
-                        raise MinerUPreciseParseFailed(
-                            "Deleted Library paper could not be restored."
-                        )
-                    row.original_filename = filename
-                    row.title = title
-                    row.authors_json = (
-                        authors if isinstance(authors, list) else [authors]
-                    )
-                    row.keywords_json = (
-                        keywords if isinstance(keywords, list) else [keywords]
-                    )
-                    row.tags_json = tags
-                    row.metadata_json = metadata
-                    row.pdf_relative_path = pdf_relative
-                    row.markdown_relative_path = markdown_relative
-                    row.status = "active"
-                    row.deleted_at = None
-                    row.created_at = utc_now()
-                    row.updated_at = utc_now()
-                    outcome = "restored"
-                session.flush()
-                record = self._record(row)
-                self._write_compatibility_metadata(principal, paper_id, metadata)
         except IntegrityError:
             with database_session(self.session_factory) as session:
                 duplicate = session.scalar(
@@ -1134,6 +1179,7 @@ class LibraryService:
                 "downloaded",
                 "already_in_library",
                 "duplicate_file",
+                "duplicate_publication",
             }:
                 continue
             paper_id = self._validated_paper_id(entry.get("paper_id"))
@@ -1247,85 +1293,37 @@ class LibraryService:
                             }
                         )
                         continue
-                    paper_id = item["suggested_paper_id"]
-                    occupied = None
-                    if duplicate is None:
-                        occupied = session.scalar(
-                            select(LibraryPaper.id).where(
-                                LibraryPaper.user_id == user_uuid,
-                                LibraryPaper.paper_id == paper_id,
-                            )
-                        )
-                    if duplicate is not None:
-                        paper_id = duplicate.paper_id
-                    elif occupied is not None or self._is_isolated_output(
-                        root, item["pdf_source"]
-                    ):
-                        paper_id = self._new_paper_id()
-                    pdf_relative, markdown_relative, metadata, artifact_rows = (
-                        self._publish_library_triplet(
-                            principal,
-                            paper_id,
-                            pdf_source=item["pdf_source"],
-                            markdown_source=item["markdown_source"],
-                            metadata=item["metadata"],
-                        )
+                    record, outcome, stored_metadata = self._publish_catalog_entry(
+                        principal,
+                        session,
+                        user_uuid=user_uuid,
+                        root=root,
+                        paper_id=item["suggested_paper_id"],
+                        content_sha256=item["content_sha256"],
+                        filename=item["original_filename"],
+                        title=item["title"],
+                        authors=item["authors"],
+                        keywords=item["keywords"],
+                        tags=item["tags"],
+                        metadata=item["metadata"],
+                        pdf_source=item["pdf_source"],
+                        markdown_source=item["markdown_source"],
+                        duplicate=duplicate,
+                        new_outcome="downloaded",
+                        inserted_by_digest=inserted_by_digest,
                     )
-                    session.add_all(artifact_rows)
-                    if duplicate is None:
-                        row = LibraryPaper(
-                            user_id=user_uuid,
-                            paper_id=paper_id,
-                            content_sha256=item["content_sha256"],
-                            original_filename=item["original_filename"],
-                            title=item["title"],
-                            authors_json=item["authors"],
-                            keywords_json=item["keywords"],
-                            tags_json=item["tags"],
-                            metadata_json=metadata,
-                            pdf_relative_path=pdf_relative,
-                            markdown_relative_path=markdown_relative,
-                            status="active",
-                        )
-                        session.add(row)
-                        catalog_outcome = "downloaded"
-                    else:
-                        row = session.scalar(
-                            select(LibraryPaper)
-                            .where(LibraryPaper.id == duplicate.id)
-                            .with_for_update()
-                        )
-                        if row is None:
-                            raise MinerUPreciseParseFailed(
-                                "Deleted Library paper could not be restored."
-                            )
-                        row.original_filename = item["original_filename"]
-                        row.title = item["title"]
-                        row.authors_json = item["authors"]
-                        row.keywords_json = item["keywords"]
-                        row.tags_json = item["tags"]
-                        row.metadata_json = metadata
-                        row.pdf_relative_path = pdf_relative
-                        row.markdown_relative_path = markdown_relative
-                        row.status = "active"
-                        row.deleted_at = None
-                        row.created_at = utc_now()
-                        row.updated_at = utc_now()
-                        catalog_outcome = "restored"
-                    session.flush()
-                    inserted_by_digest[item["content_sha256"]] = row
-                    records.append(self._record(row))
-                    compatibility.append((paper_id, metadata))
+                    records.append(record)
+                    compatibility.append((record.paper_id, stored_metadata))
                     item["entry"].update(
                         {
                             "status": "downloaded",
-                            "catalog_outcome": catalog_outcome,
-                            "paper_id": paper_id,
+                            "catalog_outcome": outcome,
+                            "paper_id": record.paper_id,
                             "path": str(
-                                root / Path(*PurePosixPath(pdf_relative).parts)
+                                root / Path(*PurePosixPath(record.pdf_relative_path).parts)
                             ),
                             "artifact_ids": dict(
-                                metadata.get("_artifact_ids") or {}
+                                stored_metadata.get("_artifact_ids") or {}
                             ),
                         }
                     )
@@ -1344,17 +1342,29 @@ class LibraryService:
         ]
         result["added_count"] = sum(status == "downloaded" for status in outcomes)
         result["already_present_count"] = sum(
-            status in {"already_in_library", "duplicate_file"}
+            status in {"already_in_library", "duplicate_file", "duplicate_publication"}
             for status in outcomes
         )
         result["failed_count"] = sum(
-            status not in {"downloaded", "already_in_library", "duplicate_file"}
+            status not in {"downloaded", "already_in_library", "duplicate_file", "duplicate_publication"}
             for status in outcomes
         )
         return records
 
     def count(self, principal: Principal) -> int:
-        return len(self.list(principal))
+        principal.require(Permission.PROJECT_READ)
+        with database_session(self.session_factory) as session:
+            return (
+                session.scalar(
+                    select(func.count())
+                    .select_from(LibraryPaper)
+                    .where(
+                        LibraryPaper.user_id == uuid.UUID(principal.user_id),
+                        LibraryPaper.deleted_at.is_(None),
+                    )
+                )
+                or 0
+            )
 
     def list(self, principal: Principal, query: str = "") -> list[LibraryPaperRecord]:
         principal.require(Permission.PROJECT_READ)
@@ -1385,6 +1395,48 @@ class LibraryService:
                 ]
             ).casefold()
         ]
+
+    def page(
+        self,
+        principal: Principal,
+        query: str = "",
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[LibraryPaperRecord], int]:
+        """One browsing page plus the total, without building the whole library.
+
+        An unfiltered browse is answered by the database: a workspace with
+        hundreds of papers must not construct every record to render the first
+        screen. An explicit query still ranks in memory, because metadata search
+        spans several columns and the ranking must see every candidate; only the
+        requested slice is returned.
+        """
+        principal.require(Permission.PROJECT_READ)
+        size = max(1, min(int(limit), 500))
+        start = max(0, int(offset))
+        needle = str(query or "").strip()
+        if needle:
+            matched = self.list(principal, needle)
+            return matched[start:start + size], len(matched)
+        user_uuid = uuid.UUID(principal.user_id)
+        owned = (
+            LibraryPaper.user_id == user_uuid,
+            LibraryPaper.deleted_at.is_(None),
+        )
+        with database_session(self.session_factory) as session:
+            total = session.scalar(
+                select(func.count()).select_from(LibraryPaper).where(*owned)
+            )
+            rows = session.scalars(
+                select(LibraryPaper)
+                .where(*owned)
+                .order_by(LibraryPaper.created_at.asc(), LibraryPaper.id.asc())
+                .limit(size)
+                .offset(start)
+            ).all()
+            records = [self._record(row) for row in rows]
+        return records, int(total or 0)
 
     def get(self, principal: Principal, paper_id: str) -> LibraryPaperRecord:
         principal.require(Permission.PROJECT_READ)
@@ -1538,11 +1590,12 @@ class LibraryService:
             ),
         )
         old_source = str(old_field.get("source") or "") if isinstance(old_field, dict) else ""
-        legacy_guess = old_source in {
-            "markdown_introduction_ending_summary",
-            "content_list_first_paragraph_after_authors",
-        }
-        replacement = candidate if candidate["value"] or legacy_guess else None
+        # `markdown_introduction_ending_summary` was an introduction summary that
+        # was never the paper's abstract, so it may be cleared.  A first paragraph
+        # after the byline is often the real abstract; keep it unless the
+        # deterministic reader finds something better.
+        discardable_guess = old_source == "markdown_introduction_ending_summary"
+        replacement = candidate if candidate["value"] or discardable_guess else None
         if replacement is None:
             return current, "not_found"
         if replacement == old_field:
@@ -1652,11 +1705,33 @@ class LibraryService:
             updated_metadata, changed_fields = apply_bibliography_updates(
                 current.metadata, merged_audit
             )
+            recovered_abstract = merged_audit.get("abstract_recovery")
+            if (
+                isinstance(recovered_abstract, dict)
+                and str(recovered_abstract.get("decision") or "") == "abstract"
+                and str(recovered_abstract.get("value") or "").strip()
+                and not abstract_value((updated_metadata.get("abstract") or {}).get("value"))
+            ):
+                # An unlabelled opening abstract the model quoted verbatim from
+                # owned source text.  Never replaces a stored or checked value.
+                updated_metadata["abstract"] = {
+                    "value": recovered_abstract["value"],
+                    "source": recovered_abstract.get("source")
+                    or "model_identified_opening_abstract",
+                    "confidence": 0.8,
+                    "human_checked": False,
+                }
+                changed_fields = [*changed_fields, "abstract"]
             persisted_audit = {
                 **merged_audit,
                 "paper_id": current.paper_id,
                 "canonical_metadata_changed": bool(changed_fields),
                 "changed_fields": changed_fields,
+                # Fingerprint of the state that is actually stored, so an
+                # unchanged re-queue reuses this verdict instead of paying again.
+                "input_fingerprint": self._bibliography_fingerprint(
+                    principal, current, updated_metadata
+                ),
             }
             try:
                 record = self._persist_metadata_and_audit(
@@ -1679,6 +1754,24 @@ class LibraryService:
             "canonical_metadata_artifact_id": record.artifact_ids.get("metadata"),
         }
         return record, response_audit
+
+    def _bibliography_fingerprint(
+        self,
+        principal: Principal,
+        current: LibraryPaperRecord,
+        metadata: dict[str, Any],
+    ) -> str:
+        """Identify the document and canonical fields an audit verdict covers."""
+
+        markdown_text = ""
+        try:
+            root = self.workspace_manager.user_root(principal.user_id)
+            markdown_text = self._safe_stored_path(
+                root, current.markdown_relative_path
+            ).read_text(encoding="utf-8", errors="replace")
+        except (WorkflowNotFound, OSError):
+            markdown_text = ""
+        return bibliography_input_fingerprint(metadata, markdown_text)
 
     @staticmethod
     def _safe_stored_path(root: Path, relative_path: str) -> Path:

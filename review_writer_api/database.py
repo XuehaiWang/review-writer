@@ -229,7 +229,8 @@ class Project(Base, TimestampMixin):
     )
     model_tier: Mapped[str] = mapped_column(String(32), default="terra", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
-    current_stage: Mapped[str] = mapped_column(String(64), default="discovery", nullable=False)
+    # The current stage is derived from stage_states on every read, so it is not
+    # persisted: a stored copy could only drift from the checkpoints it mirrors.
     stage_states: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

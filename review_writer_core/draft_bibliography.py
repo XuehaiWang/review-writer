@@ -13,7 +13,10 @@ from .paragraph_markers import PARAGRAPH_MARKER_RE, parse_marked_paragraphs
 
 
 PARAGRAPH_MARKER = PARAGRAPH_MARKER_RE
-CALLOUT_RE = re.compile(r"\[((?:\d+\s*(?:[-–]\s*\d+)?\s*[,;]?\s*)+)\]")
+# A bracketed number group is a citation, except when a hyphen follows it: that
+# is a chemical locant ([2,3]-sigmatropic, [1,2]-shift), and treating it as a
+# citation used to delete or renumber the locant in real drafts.
+CALLOUT_RE = re.compile(r"\[((?:\d+\s*(?:[-–]\s*\d+)?\s*[,;]?\s*)+)\](?!\s*[-–‑])")
 REFERENCE_HEADING_RE = re.compile(r"(?mi)^##\s+References\s*$")
 CITATION_MAP_RE = re.compile(r"<!--\s*citation_map:\s*(\{[^\n]*\})\s*-->")
 REFERENCE_WEB_RESIDUE = re.compile(

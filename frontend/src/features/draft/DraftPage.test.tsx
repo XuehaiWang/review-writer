@@ -111,6 +111,24 @@ it("starts with the manuscript and opens optional tools without a numbered wizar
   fireEvent.click(screen.getByRole("button", { name: "History" }));
   expect(screen.getByText("No historical versions yet.")).toBeTruthy();
 });
+it("shows current manuscript wording clues without launching batch revision or blocking approval", async () => {
+  vi.mocked(apiRequest).mockImplementation(async path => {
+    if (path === "/api/v1/me") return { user_id: "u" };
+    if (path.endsWith("/draft")) return { ...draft, narrative_repetition: {
+      status: "complete", method: "surface_clues_v1", covered_paragraph_count: 1,
+      total_paragraph_count: 1, hints: [{ kind: "repeated_closing", paragraph_ids: ["S1-p1"],
+        phrase: "taken together", basis: "surface_wording_only" }],
+    } };
+    if (path.includes("section-dialogues")) return { turns: [] };
+    throw new Error("Unexpected request: " + path);
+  });
+  mount();
+  const nav = await screen.findByRole("navigation", { name: "Draft workspace" });
+  fireEvent.click(within(nav).getByRole("button", { name: "Batch revision" }));
+  expect(screen.getByText(/1 possible wording repetitions/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "Approve and enter Final" })).toBeEnabled();
+  expect(vi.mocked(apiRequest).mock.calls.every(([, options]) => !options || options.method !== "POST")).toBe(true);
+});
 it("keeps Final approval in the bottom action bar and blocks stale manuscripts", async () => {
   vi.mocked(apiRequest).mockImplementation(async path => {
     if (path === "/api/v1/me") return { user_id: "u" };

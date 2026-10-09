@@ -1,5 +1,6 @@
 """Discovery task registration independent of HTTP routes."""
 
+from review_writer_api.errors import WorkflowConflict, WorkflowNotFound, WorkflowValidationError
 from review_writer_api.security import Principal, Role
 from review_writer_api.job_handlers.lifecycle import report_committed_progress
 
@@ -26,6 +27,54 @@ def register_discovery_handlers(discovery_service, job_service, handlers):
         return result
 
     job_service.register_handler("discovery.candidate-refresh", candidate_refresh_handler)
+
+    def acquire_handler(context, payload):
+        """Acquire Discovery candidates, then refresh their Discovery state.
+
+        Discovery owns this whole chain. It reuses the Library download
+        implementation through the registered job handler, so Library never has
+        to know that Discovery exists, and no back-channel payload field is
+        needed to tell it what to refresh afterwards.
+        """
+
+        download = job_service.handlers.get("library.download")
+        if download is None:
+            raise RuntimeError(
+                "The Library download handler is unavailable; cannot acquire Discovery candidates."
+            )
+        result = dict(download(context, payload) or {})
+        principal = Principal(context.user_id, frozenset({Role.USER}))
+        project_id = str(payload.get("project_id") or context.project_id or "")
+        source_revision = (
+            int(payload["discovery_revision"])
+            if type(payload.get("discovery_revision")) is int
+            else None
+        )
+        acquisitions = [
+            (str(entry.get("candidate_id") or ""), str(entry.get("paper_id") or ""))
+            for entry in result.get("results") or []
+            if isinstance(entry, dict)
+        ]
+        acquisitions = [pair for pair in acquisitions if pair[0] and pair[1]]
+        refreshed = skipped = 0
+        if acquisitions:
+            try:
+                # One revision for the whole batch: N downloads no longer
+                # republish the entire review N times.
+                outcome = discovery_service.refresh_acquired_candidates(
+                    principal, project_id, acquisitions, source_revision=source_revision
+                )
+                refreshed = len(outcome.get("refreshed") or [])
+                skipped = len(outcome.get("skipped") or [])
+            except (WorkflowNotFound, WorkflowConflict, WorkflowValidationError):
+                # The papers are already in the Library; a refresh that cannot be
+                # published must not undo a completed acquisition.
+                skipped = len(acquisitions)
+        result["candidate_refreshed_count"] = refreshed
+        result["candidate_refresh_skipped_count"] = skipped
+        return result
+
+    job_service.register_handler("discovery.acquire", acquire_handler)
     if builder is not None:
 
         def discovery_handler(context, payload):

@@ -869,7 +869,7 @@ export function SvgKetcherEditor({
       const size = outputPixelSize(stateToSave);
       const png = await svgToPng(svg, size.width, size.height);
       await apiRequest(
-        `/api/v1/projects/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(figureId)}/manual-edit`,
+        `/api/v1/projects/${encodeURIComponent(projectId)}/images/${encodeURIComponent(figureId)}/manual-edit`,
         {
           method: "POST",
           ...jsonBody({

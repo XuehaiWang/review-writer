@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -72,6 +73,8 @@ class FigureJobHandlers:
                 requested_figure_type,
                 "--render-mode",
                 "ai-edit",
+                "--palette",
+                os.environ.get("REVIEW_WRITER_FIGURE_PALETTE", "").strip() or "monochrome",
                 "--require-redrawn",
             ]
         if requested_figure_type.strip().casefold() != "auto":

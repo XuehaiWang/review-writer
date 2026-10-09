@@ -29,6 +29,7 @@ if _BOOTSTRAP_ROOT is None:
 if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
+from review_writer_core.atomic_io import atomic_write_json as write_json  # noqa: E402
 from review_writer_core.provider_errors import normalize_provider_error, provider_error_message
 from review_writer_core.providers import (  # noqa: E402
     DEFAULT_OPENAI_BASE_URL,
@@ -401,13 +402,6 @@ def read_json(path: Path, default: Any = None) -> Any:
     if not path.is_file():
         return default
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def write_rewrite_queue_checkpoint(
@@ -2170,10 +2164,6 @@ def normalize_evaluation(
         for paragraph in paragraphs
         if isinstance(paragraph, dict)
     }
-    paragraph_roles = {
-        str(check.get("paragraph_id") or ""): str(check.get("paragraph_role") or "")
-        for check in preflight.get("paragraph_checks") or [] if isinstance(check, dict)
-    }
     for paragraph_id in paragraph_ids:
         item = score_by_id[paragraph_id]
         score = max(0.0, min(100.0, float(item.get("score", 0))))
@@ -3165,44 +3155,6 @@ def record_paragraph_history(
     write_json(path, {"entries": entries})
 
 
-def apply_rewrite_overlays(project: Path) -> dict[str, Any]:
-    """Replay safe feedback rewrites after a future deterministic draft rebuild."""
-    draft_path = project / "04_first_draft" / "first_draft.md"
-    overlay_path = project / "04_first_draft" / "feedback_loop_rewrites.json"
-    payload = read_json(overlay_path, {}) or {}
-    entries = payload.get("entries") if isinstance(payload, dict) else {}
-    if not draft_path.is_file() or not isinstance(entries, dict) or not entries:
-        return {"applied": [], "conflicts": []}
-    markdown = draft_path.read_text(encoding="utf-8", errors="replace")
-    applied: list[str] = []
-    conflicts: list[str] = []
-    for paragraph_id, entry in entries.items():
-        current = next(
-            (item for item in parse_marked_paragraphs(markdown) if item["paragraph_id"] == paragraph_id),
-            None,
-        )
-        if not current or not isinstance(entry, dict):
-            conflicts.append(str(paragraph_id))
-            continue
-        current_sha = hashlib.sha256(clean_text(current["text"]).encode("utf-8")).hexdigest()
-        if current_sha != str(entry.get("source_text_sha256") or ""):
-            conflicts.append(str(paragraph_id))
-            continue
-        rewritten = str(entry.get("rewritten_text") or "").strip()
-        if not rewritten:
-            conflicts.append(str(paragraph_id))
-            continue
-        markdown = replace_paragraph_in_markdown(markdown, str(paragraph_id), rewritten)
-        applied.append(str(paragraph_id))
-    if applied:
-        temporary = draft_path.with_suffix(".md.feedback-replay.tmp")
-        temporary.write_text(markdown, encoding="utf-8")
-        temporary.replace(draft_path)
-    report = {"applied": applied, "conflicts": conflicts, "applied_at": utc_now()}
-    write_json(project / "04_first_draft" / "feedback_loop_replay.json", report)
-    return report
-
-
 def status_path(project: Path) -> Path:
     return project / "04_first_draft" / "feedback_loop_status.json"
 
@@ -3527,7 +3479,6 @@ def queue_artifacts(project: Path, evaluation: dict[str, Any], preflight: dict[s
         )
         target.append({"origin": "rubric", **item})
     score = float(evaluation.get("total_score", 0))
-    goal = float(evaluation.get("pass_threshold", DRAFT_PASS_THRESHOLD))
     hard = sorted(set(evaluation.get("hard_gate_failures") or []) | set(preflight.get("hard_regressions") or []))
     released = evaluation.get("decision") == "PASS" and not hard and not rewrite
     decision = "GATE_RELEASE" if released else "GATE_HOLD_REWRITE_REQUIRED"
@@ -4255,9 +4206,6 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                 evaluation = working_evaluation
                 preflight = working_preflight
                 evidence = working_evidence
-                paragraphs = parse_marked_paragraphs(
-                    draft_path.read_text(encoding="utf-8", errors="replace")
-                )
                 gate = queue_artifacts(project, evaluation, preflight)
                 update_status(
                     project,
@@ -4267,7 +4215,6 @@ def run_feedback_loop(args: argparse.Namespace) -> dict[str, Any]:
                     gate_decision=gate["gate_decision"],
                 )
             final_evaluation, final_preflight = evaluation, preflight
-            paragraph_scores = evaluation.get("paragraph_scores") or []
             if not source_evaluation:
                 source_evaluation = json.loads(
                     json.dumps(evaluation, ensure_ascii=False)

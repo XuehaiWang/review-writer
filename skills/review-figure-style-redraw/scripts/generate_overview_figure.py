@@ -61,6 +61,8 @@ if str(_BOOTSTRAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_BOOTSTRAP_ROOT))
 
 from review_writer_core.providers import (  # noqa: E402
+    decode_json_object,
+    load_dotenv,
     DEFAULT_IMAGE_MODEL,
     DEFAULT_OPENAI_BASE_URL,
     openai_endpoint as _shared_openai_endpoint,
@@ -69,7 +71,7 @@ from review_writer_core.providers import (  # noqa: E402
 from review_writer_core.model_gateway_client import (  # noqa: E402
     call_image_model as call_gateway_image,
     call_json_model as call_gateway_json,
-    gateway_configured as _text_gateway_configured,
+    gateway_configured as _text_gateway_configured,  # noqa: F401 - test seam for gateway compatibility
     image_gateway_configured,
 )
 from review_writer_core.review_titles import (  # noqa: E402
@@ -110,8 +112,7 @@ from review_writer_core.stages.figures.overview_style import (
     validate_image_bytes,
 )
 from review_writer_core.stages.figures.overview_reaction import (
-    choose_reaction_presentation, is_reaction_mode, scheme_for_presentation, map_reaction_r_groups,
-    reaction_evidence_excerpt,
+    is_reaction_mode,
 )
 from review_writer_core.stages.figures.overview_presentation import (
     build_overview_display_contract, display_text_is_within_budget,
@@ -244,19 +245,6 @@ def condense_overview_prompt(prompt: str, max_chars: int = _PROMPT_MAX_CHARS) ->
     return condensed[: max_chars - len(guard) - 2].rstrip() + "\n\n" + guard
 
 
-def decode_json_object(raw: bytes, label: str) -> dict[str, Any]:
-    if not raw.strip():
-        raise RuntimeError(f"{label} returned an empty response body")
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        preview = raw.decode("utf-8", "replace")[:300].replace("\r", " ").replace("\n", " ")
-        raise RuntimeError(f"{label} returned non-JSON content: {preview or '<empty>'}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{label} returned JSON {type(data).__name__}, expected an object")
-    return data
-
-
 def open_json_request(request: urllib.request.Request, label: str, timeout: int = 300) -> dict[str, Any]:
     for attempt in range(3):
         try:
@@ -271,20 +259,6 @@ def open_json_request(request: urllib.request.Request, label: str, timeout: int 
                 raise RuntimeError(f"{label} transport failed: {exc}") from exc
         time.sleep(2 ** attempt)
     raise RuntimeError(f"{label} failed after retries")
-
-
-def load_dotenv(review_root: Path) -> None:
-    path = review_root / ".env"
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.removeprefix("export ").strip()
-        if key:
-            os.environ.setdefault(key, value.strip().strip("'\""))
 
 
 def read_json(path: Path) -> Any:
@@ -317,48 +291,7 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-_CPK_COLORS = {
-    "C": (35, 35, 35), "H": (245, 245, 245), "O": (220, 30, 30),
-    "N": (40, 80, 220), "S": (230, 200, 40), "P": (250, 140, 30),
-    "Si": (200, 170, 120), "B": (240, 150, 180), "R": (70, 130, 200),
-    # Halogens
-    "F": (80, 220, 80), "Cl": (30, 190, 30), "Br": (160, 50, 30),
-    "I": (130, 0, 150),
-    # Transition metals (CPK-inspired distinct colors for catalysis reviews)
-    "Pd": (0, 105, 133), "Cu": (200, 120, 50), "Fe": (225, 100, 30),
-    "Zn": (125, 125, 130), "Ni": (80, 208, 80), "Co": (240, 144, 160),
-    "Au": (255, 209, 35), "Ag": (192, 192, 192), "Pt": (208, 208, 224),
-    "Ir": (22, 153, 139), "Rh": (10, 122, 135), "Ru": (36, 144, 144),
-    "Mn": (156, 122, 197), "Ti": (191, 194, 199), "Cr": (138, 153, 199),
-    "V": (166, 166, 171), "Mo": (84, 181, 181), "W": (34, 148, 201),
-    "Re": (38, 125, 125), "Os": (38, 102, 150),
-    # Main group metals
-    "Al": (191, 166, 165), "Sn": (102, 128, 128), "Li": (204, 128, 255),
-    "Na": (171, 92, 242), "K": (143, 64, 212), "Mg": (138, 255, 0),
-    "Ca": (61, 255, 0), "Se": (255, 161, 0), "Te": (212, 122, 0),
-}
-_ATOM_RADIUS = {
-    "C": 20, "H": 12, "O": 19, "N": 19, "S": 22, "P": 22,
-    "Si": 22, "B": 19, "R": 24,
-    # Halogens
-    "F": 14, "Cl": 20, "Br": 22, "I": 24,
-    # Transition metals (slightly larger spheres)
-    "Pd": 26, "Cu": 24, "Fe": 24, "Zn": 24, "Ni": 24, "Co": 24,
-    "Au": 26, "Ag": 26, "Pt": 26, "Ir": 26, "Rh": 26, "Ru": 25,
-    "Mn": 24, "Ti": 26, "Cr": 24, "V": 24, "Mo": 26, "W": 26,
-    "Re": 26, "Os": 26,
-    # Main group metals
-    "Al": 24, "Sn": 26, "Li": 28, "Na": 30, "K": 32, "Mg": 26,
-    "Ca": 28, "Se": 22, "Te": 24,
-}
-
-
-# Generic SMILES -> accurate 3D geometry. Any review topic can supply its core
-# motif as SMILES; legacy motif lookup is provided by taxonomy resources.
-# Geometry is exact by construction:
-# rings = regular polygons, substituents grow with ideal hybridization angles
-# (sp 180 / sp2 120 / sp3 109.5), cumulated double bonds get perpendicular
-# planes (allene chirality).
+# Lightweight validation fallback. Published structures are rendered by RDKit 2D.
 
 _VALENCE = {"C": 4, "N": 3, "O": 2, "S": 2, "P": 3, "B": 3, "H": 1,
             "F": 1, "Cl": 1, "Br": 1, "I": 1, "Si": 4, "R": 0,
@@ -372,110 +305,6 @@ _AROMATIC_EL = {"c": "C", "n": "N", "o": "O", "s": "S", "p": "P",
 _TWO_LETTER = ("Cl", "Br", "Si", "Fe", "Cu", "Zn", "Ni", "Co", "Au", "Ag",
                "Pt", "Ir", "Rh", "Ru", "Mn", "Ti", "Al", "Sn", "Se", "Te",
                "Li", "Na", "Mg", "Ca", "Pd")
-
-
-# ---------------------------------------------------------------------------
-# RDKit fast-path: if available, parse SMILES and generate 3D coordinates
-# using the industry-standard cheminformatics toolkit.  Falls back to the
-# lightweight built-in parser below when RDKit is not installed.
-# ---------------------------------------------------------------------------
-
-def _try_rdkit_parse(smiles: str):
-    """Attempt RDKit SMILES parsing; returns (atoms, bonds) or None."""
-    try:
-        from rdkit import Chem  # noqa: F811
-    except ImportError:
-        return None
-    mol = Chem.MolFromSmiles(smiles, sanitize=True)
-    if mol is None:
-        # A non-sanitized molecule is useful for diagnostics, never for a
-        # published overview.  Do not silently bypass valence/aromaticity
-        # checks merely because a renderer could draw something.
-        return [], []
-    atoms: list[dict[str, Any]] = []
-    bonds: list[tuple[int, int, float]] = []
-    for rd_atom in mol.GetAtoms():
-        # RDKit names dummy atoms "*"; the renderer, the R-label drawing and
-        # skeleton_atom_counts all key off "R" (the built-in parser's symbol
-        # for a wildcard substituent), so normalize it here.
-        symbol = rd_atom.GetSymbol()
-        el = "R" if symbol == "*" else symbol
-        aromatic = rd_atom.GetIsAromatic()
-        num_hs = rd_atom.GetTotalNumHs()
-        atoms.append({"el": el, "aromatic": aromatic, "h": num_hs})
-    for rd_bond in mol.GetBonds():
-        a = rd_bond.GetBeginAtomIdx()
-        b = rd_bond.GetEndAtomIdx()
-        bt = rd_bond.GetBondTypeAsDouble()
-        # RDKit uses 1.0/2.0/3.0 for S/D/T and 1.5 for aromatic
-        bonds.append((a, b, bt))
-    return atoms, bonds
-
-
-def _try_rdkit_3d(smiles: str):
-    """Attempt RDKit 3D coordinate generation.
-
-    Returns ``(coords, atoms, bonds)`` with explicit hydrogens, or ``None``
-    on any failure (never raises).
-    """
-    try:
-        from rdkit import Chem
-        from rdkit.Chem import AllChem
-    except ImportError:
-        return None
-    try:
-        mol = Chem.MolFromSmiles(smiles, sanitize=False)
-        if mol is None:
-            return None
-        try:
-            Chem.SanitizeMol(mol)
-        except Exception:
-            pass
-        mol = Chem.AddHs(mol)
-        result = AllChem.EmbedMolecule(mol, randomSeed=42, useRandomCoords=True)
-        if result == -1:
-            return None
-        AllChem.MMFFOptimizeMolecule(mol, maxIters=300)
-        conf = mol.GetConformer()
-        coords = []
-        for i in range(mol.GetNumAtoms()):
-            pos = conf.GetAtomPosition(i)
-            coords.append((pos.x, pos.y, pos.z))
-        # RDKit generates coords for all atoms including H; re-derive the
-        # atom/bond lists from the same mol object so indices align.
-        rd_atoms: list[dict[str, Any]] = []
-        for rd_atom in mol.GetAtoms():
-            symbol = rd_atom.GetSymbol()
-            rd_atoms.append(
-                {"el": "R" if symbol == "*" else symbol, "aromatic": False, "h": 0}
-            )
-        rd_bonds: list[tuple[int, int, float]] = []
-        for rd_bond in mol.GetBonds():
-            rd_bonds.append(
-                (rd_bond.GetBeginAtomIdx(), rd_bond.GetEndAtomIdx(),
-                 rd_bond.GetBondTypeAsDouble())
-            )
-        return coords, rd_atoms, rd_bonds
-    except Exception:
-        return None
-
-
-def parse_smiles(smiles: str):
-    """Parse a SMILES string into atoms/bonds (aromatic bond = 1.5).
-
-    Attempts RDKit first for maximum chemical accuracy, falls back to the
-    built-in lightweight parser when RDKit is unavailable.
-    """
-    # --- RDKit fast-path (preferred) ---
-    rdkit_result = _try_rdkit_parse(smiles)
-    if rdkit_result is not None:
-        atoms, bonds = rdkit_result
-        if atoms:
-            return atoms, bonds
-        raise ValueError("RDKit rejected SMILES during sanitization")
-
-    # --- Fallback: built-in lightweight parser ---
-    return _parse_smiles_fallback(smiles)
 
 
 def _parse_smiles_fallback(smiles: str, strict: bool = False):
@@ -586,443 +415,6 @@ def _parse_smiles_fallback(smiles: str, strict: bool = False):
     return atoms, bonds
 
 
-def _assign_hybrid(atoms, bonds):
-    hyb = []
-    for i, a in enumerate(atoms):
-        orders = [o for (x, y, o) in bonds if x == i or y == i]
-        if a["el"] in ("H", "R"):
-            hyb.append("sp3")
-        elif 3.0 in orders or orders.count(2.0) >= 2:
-            hyb.append("sp")
-        elif a["aromatic"] or 1.5 in orders or 2.0 in orders:
-            hyb.append("sp2")
-        else:
-            hyb.append("sp3")
-    return hyb
-
-
-def _vadd(a, b): return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
-def _vsub(a, b): return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
-def _vscale(a, s): return (a[0] * s, a[1] * s, a[2] * s)
-def _vdot(a, b): return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-def _vcross(a, b):
-    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
-
-
-def _vnorm(a):
-    ln = math.sqrt(_vdot(a, a))
-    return (a[0] / ln, a[1] / ln, a[2] / ln) if ln > 1e-9 else None
-
-
-def _regular_polygon(m, edge):
-    r = edge / (2 * math.sin(math.pi / m))
-    return [(r * math.cos(2 * math.pi * k / m), r * math.sin(2 * math.pi * k / m), 0.0)
-            for k in range(m)]
-
-
-def _find_rings(n, bonds):
-    """Return ring cycles (3-7 members). Fused rings are recovered by
-    reducing large perimeter cycles against accepted small rings via
-    undirected edge-set symmetric difference."""
-    from collections import deque
-    adj = [[] for _ in range(n)]
-    for a, b, _o in bonds:
-        adj[a].append(b)
-        adj[b].append(a)
-    parent = [-1] * n
-    seen = [False] * n
-    raw = []
-    for root in range(n):
-        if seen[root]:
-            continue
-        seen[root] = True
-        q = deque([root])
-        while q:
-            u = q.popleft()
-            for v in adj[u]:
-                if not seen[v]:
-                    seen[v] = True
-                    parent[v] = u
-                    q.append(v)
-                elif v != parent[u] and u != parent[v]:
-                    anc = set()
-                    x = u
-                    while x != -1:
-                        anc.add(x)
-                        x = parent[x]
-                    y = v
-                    while y not in anc:
-                        y = parent[y]
-                    cyc, x = [], u
-                    while x != y:
-                        cyc.append(x)
-                        x = parent[x]
-                    cyc.append(y)
-                    x = v
-                    tail = []
-                    while x != y:
-                        tail.append(x)
-                        x = parent[x]
-                    cyc += list(reversed(tail))  # lca -> v direction
-                    if len(cyc) >= 3:
-                        raw.append(cyc)
-
-    cycles: list[list[int]] = []
-    seen_sets: set[frozenset] = set()
-    for cyc in sorted(raw, key=len):
-        if len(cyc) <= 7 and frozenset(cyc) not in seen_sets:
-            seen_sets.add(frozenset(cyc))
-            cycles.append(cyc)
-
-    def _edge_set(cyc):
-        es = {frozenset((cyc[i], cyc[(i + 1) % len(cyc)])) for i in range(len(cyc))}
-        return es
-
-    def _order(diff):
-        emap: dict[int, list[int]] = {}
-        for e in diff:
-            x, y = tuple(e)
-            emap.setdefault(x, []).append(y)
-            emap.setdefault(y, []).append(x)
-        verts = set(emap)
-        ordered, cur, prv = [], next(iter(verts)), None
-        for _ in verts:
-            ordered.append(cur)
-            nxts = [w for w in emap[cur] if w != prv]
-            prv, cur = cur, nxts[0]
-        return ordered
-
-    for cyc in sorted(raw, key=len):
-        if len(cyc) <= 7:
-            continue
-        big = _edge_set(cyc)
-        for small in list(cycles):
-            diff = big ^ _edge_set(small)
-            verts = set()
-            for e in diff:
-                verts |= set(e)
-            if not (3 <= len(verts) <= 7 and len(diff) == len(verts)):
-                continue
-            if all(sum(1 for e in diff if v in e) == 2 for v in verts) \
-                    and frozenset(verts) not in seen_sets:
-                seen_sets.add(frozenset(verts))
-                cycles.append(_order(diff))
-                break
-    cycles.sort(key=len)
-    return cycles
-
-
-_SINGLE_LEN = {
-    ("C", "C"): 1.50, ("C", "O"): 1.43, ("C", "N"): 1.47, ("C", "S"): 1.82,
-    ("C", "F"): 1.35, ("C", "Cl"): 1.77, ("C", "Br"): 1.94, ("C", "I"): 2.14,
-    ("C", "Si"): 1.86, ("C", "P"): 1.87, ("C", "H"): 1.09, ("O", "H"): 0.96,
-    ("N", "H"): 1.01, ("N", "O"): 1.40, ("O", "O"): 1.48, ("N", "N"): 1.45,
-    ("S", "O"): 1.58, ("C", "B"): 1.56,
-}
-
-
-def _bond_len(el_a, el_b, order):
-    if "R" in (el_a, el_b):
-        return 1.5
-    key = (el_a, el_b) if (el_a, el_b) in _SINGLE_LEN else (el_b, el_a)
-    base = _SINGLE_LEN.get(key, 1.5)
-    if order >= 3.0:
-        return base - 0.3
-    if order == 2.0:
-        return base - 0.2
-    if order == 1.5:
-        return 1.39 if {el_a, el_b} == {"C"} else base
-    return base
-
-
-_SLOTS = {
-    "sp": [(1, 0, 0), (-1, 0, 0)],
-    "sp2": [(1, 0, 0), (-0.5, 0.8660254, 0), (-0.5, -0.8660254, 0)],
-    "sp3": [(1, 0, 0), (-0.3333, 0.9428, 0), (-0.3333, -0.4714, 0.8165),
-            (-0.3333, -0.4714, -0.8165)],
-}
-
-
-def build_3d(atoms, bonds):
-    """Deterministic exact-geometry 3D embedding (rings + hybridization growth)."""
-    from collections import deque
-    n = len(atoms)
-    if n == 0:
-        return []
-    hyb = _assign_hybrid(atoms, bonds)
-    coords: list = [None] * n
-    frames: list = [None] * n
-    used: list = [[] for _ in range(n)]
-    order_of = {}
-    adj = [[] for _ in range(n)]
-    for a, b, o in bonds:
-        order_of[(a, b)] = o
-        order_of[(b, a)] = o
-        adj[a].append(b)
-        adj[b].append(a)
-
-    def mark_used(i, d):
-        nd = _vnorm(d)
-        if nd:
-            used[i].append(nd)
-
-    rings = _find_rings(n, bonds)
-    deferred: list[list[int]] = []
-
-    def place_ring(ring):
-        m = len(ring)
-        aromatic = any(atoms[i]["aromatic"] for i in ring)
-        edge = 1.39 if aromatic else (1.51 if m == 3 else 1.5)
-        poly = _regular_polygon(m, edge)
-        pair = None
-        for k in range(m):
-            a, b = ring[k], ring[(k + 1) % m]
-            if coords[a] is not None and coords[b] is not None:
-                pair = k
-                break
-        if pair is not None:  # fused ring: align polygon edge, keep plane
-            a, b = ring[pair], ring[(pair + 1) % m]
-            A, B = coords[a], coords[b]
-            normal = frames[a][2]
-            t = _vnorm(_vsub(B, A))
-            w = _vnorm(_vcross(normal, t))
-            pa, pb = poly[pair], poly[(pair + 1) % m]
-            tl = _vnorm(_vsub(pb, pa))
-            wl = _vcross((0.0, 0.0, 1.0), tl)
-            old_placed = [coords[i] for i in range(n) if coords[i] is not None]
-            mid = _vscale(_vadd(A, B), 0.5)
-
-            def _place(wvec):
-                out = {}
-                for k, i in enumerate(ring):
-                    if coords[i] is None:
-                        q = _vsub(poly[k], pa)
-                        out[i] = _vadd(A, _vadd(_vscale(t, _vdot(q, tl)), _vscale(wvec, _vdot(q, wl))))
-                return out
-
-            cand = _place(w)
-            if not cand:  # ring already fully placed
-                return
-            new_c = [cand[i] for i in cand]
-            old_c = old_placed
-            def _centroid(pts):
-                return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts),
-                        sum(p[2] for p in pts) / len(pts))
-            # new ring must extend AWAY from the already-placed structure
-            if _vdot(_vsub(_centroid(new_c), mid), _vsub(_centroid(old_c), mid)) > 0:
-                cand = _place(_vscale(w, -1.0))
-            for i, p in cand.items():
-                coords[i] = p
-        else:
-            k0 = next(k for k, i in enumerate(ring) if coords[i] is not None) if any(
-                coords[i] is not None for i in ring) else 0
-            if coords[ring[k0]] is None:  # first ring at origin, xy plane
-                for k, i in enumerate(ring):
-                    coords[i] = poly[k]
-                normal = (0.0, 0.0, 1.0)
-            else:
-                a = ring[k0]
-                A = coords[a]
-                exo = [w for w in adj[a] if w not in ring and coords[w] is not None]
-                if exo:  # pendant ring attached by a single bond (biaryl-like):
-                    # ring plane contains the attaching bond and stands
-                    # perpendicular to the parent ring plane (atropisomer-like)
-                    b = _vnorm(_vsub(coords[exo[0]], A))
-                    p = frames[exo[0]][2] if frames[exo[0]] else (0.0, 0.0, 1.0)
-                    normal = _vnorm(_vcross(b, p)) or _vnorm(_vcross(b, (0.0, 0.0, 1.0))) or (0.0, 0.0, 1.0)
-                    T = _vscale(b, -1.0)
-                    W = _vnorm(_vcross(normal, T)) or _vnorm(p)
-                    pa = poly[k0]
-                    tl = _vnorm(_vscale(pa, -1.0))
-                    wl = _vcross((0.0, 0.0, 1.0), tl)
-                    for k, i in enumerate(ring):
-                        if coords[i] is None:
-                            q = _vsub(poly[k], pa)
-                            coords[i] = _vadd(A, _vadd(_vscale(T, _vdot(q, tl)), _vscale(W, _vdot(q, wl))))
-                else:  # spiro-like single shared atom: perpendicular plane
-                    e3p = frames[a][2] if frames[a] else (0.0, 0.0, 1.0)
-                    e1p = frames[a][0] if frames[a] else (1.0, 0.0, 0.0)
-                    normal = _vnorm(e1p)
-                    t = _vnorm(_vcross(normal, e3p)) or _vnorm(e3p)
-                    w = _vnorm(_vcross(normal, t))
-                    pa = poly[k0]
-                    tl = _vnorm(_vsub(poly[(k0 + 1) % m], pa))
-                    wl = _vcross((0.0, 0.0, 1.0), tl)
-                    for k, i in enumerate(ring):
-                        if coords[i] is None:
-                            q = _vsub(poly[k], pa)
-                            coords[i] = _vadd(A, _vadd(_vscale(t, _vdot(q, tl)), _vscale(w, _vdot(q, wl))))
-        for k, i in enumerate(ring):
-            nxt, prv = ring[(k + 1) % m], ring[(k - 1) % m]
-            e1 = _vnorm(_vsub(coords[nxt], coords[i]))
-            e3 = _vnorm(normal)
-            frames[i] = (e1, _vcross(e3, e1), e3)
-            mark_used(i, _vsub(coords[nxt], coords[i]))
-            mark_used(i, _vsub(coords[prv], coords[i]))
-
-    # Independent (non-fused) rings must wait until a connecting bond places an
-    # anchor atom; otherwise they would all be dropped onto the origin and
-    # overlap (e.g. biaryl).  They are placed in a second pass after BFS growth.
-    for ring in rings:
-        if any(coords[i] is not None for i in ring) or all(c is None for c in coords):
-            place_ring(ring)
-        else:
-            deferred.append(ring)
-
-    ring_of: dict[int, list[int]] = {}
-    for ring in deferred:
-        for i in ring:
-            ring_of[i] = ring
-
-    if all(c is None for c in coords):  # acyclic seed
-        coords[0] = (0.0, 0.0, 0.0)
-        frames[0] = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-
-    def local_to_global(i, v):
-        e1, e2, e3 = frames[i]
-        return _vadd(_vadd(_vscale(e1, v[0]), _vscale(e2, v[1])), _vscale(e3, v[2]))
-
-    def next_slot(i):
-        hybrid = [local_to_global(i, s) for s in _SLOTS[hyb[i]]]
-        if not used[i]:
-            return hybrid[0]
-        # a slot is acceptable only when clear of EVERY used direction; among
-        # acceptable slots pick the most separated one (matters for strained
-        # rings where several slots pass the threshold)
-        def sep(g):
-            return min(_vdot(g, u) for u in used[i])
-        acceptable = [g for g in hybrid
-                      if max(_vdot(g, u) for u in used[i]) < 0.9]
-        if acceptable:
-            return min(acceptable, key=sep)
-        # crowded/strained: complete the tetrahedron opposite the used sum
-        comp = _vnorm((
-            -sum(u[0] for u in used[i]),
-            -sum(u[1] for u in used[i]),
-            -sum(u[2] for u in used[i]),
-        ))
-        if comp:
-            return comp
-        for s in [(0, 1, 0), (0, 0, 1), (0, -1, 0), (0, 0, -1)]:
-            g = local_to_global(i, s)
-            if max(_vdot(g, u) for u in used[i]) < 0.9:
-                return g
-        return local_to_global(i, (0, 1, 0))
-
-    def bfs_grow():
-        q = deque(i for i in range(n) if coords[i] is not None)
-        while q:
-            u = q.popleft()
-            for v in adj[u]:
-                if coords[v] is not None:
-                    continue
-                ring = ring_of.get(v)
-                if ring is not None:
-                    if any(coords[i] is not None for i in ring):
-                        continue  # ring is placed as a polygon, not a chain
-                    if not any(coords[w] is not None for w in adj[v]
-                               if w not in ring):
-                        continue  # only the connecting anchor enters early
-                o = order_of[(u, v)]
-                d = next_slot(u)
-                coords[v] = _vadd(coords[u], _vscale(d, _bond_len(atoms[u]["el"], atoms[v]["el"], o)))
-                mark_used(u, d)
-                back = _vscale(d, -1.0)
-                e1 = back
-                e3p = frames[u][2]
-                if o == 2.0 and hyb[u] == "sp":  # cumulated double bond: perpendicular plane
-                    e3 = _vcross(e3p, d)
-                    e3 = _vnorm(e3) if _vdot(e3, e3) > 1e-6 else e3p
-                else:
-                    e3 = e3p
-                e3 = _vnorm(_vsub(e3, _vscale(e1, _vdot(e3, e1)))) or _vnorm(frames[u][0])
-                frames[v] = (e1, _vcross(e3, e1), e3)
-                mark_used(v, back)
-                q.append(v)
-
-    bfs_grow()
-    for ring in list(deferred):
-        if any(coords[i] is not None for i in ring):
-            place_ring(ring)
-            deferred.remove(ring)
-    bfs_grow()
-    for ring in deferred:  # disconnected ring fragments: translate them apart
-        placed_before = [i for i in range(n) if coords[i] is not None]
-        place_ring(ring)
-        new_idx = [i for i in ring if coords[i] is not None]
-        if placed_before:
-            dx = max(coords[b][0] for b in placed_before) - min(coords[i][0] for i in new_idx) + 3.0
-            for i in new_idx:
-                coords[i] = (coords[i][0] + dx, coords[i][1], coords[i][2])
-    if deferred:
-        bfs_grow()
-    return coords
-
-
-def _expand_hydrogens(atoms, bonds):
-    """Turn implicit H counts into explicit atoms so they render as spheres."""
-    atoms = [dict(a) for a in atoms]
-    bonds = list(bonds)
-    for i, a in enumerate(list(atoms)):
-        for _ in range(a.get("h", 0)):
-            atoms.append({"el": "H", "aromatic": False, "h": 0})
-            bonds.append((i, len(atoms) - 1, 1.0))
-        a["h"] = 0
-    return atoms, bonds
-
-
-def _rotate(p, rx, ry):
-    x, y, z = p
-    cy, sy = math.cos(ry), math.sin(ry)
-    x, z = cy * x + sy * z, -sy * x + cy * z
-    cx, sx = math.cos(rx), math.sin(rx)
-    y, z = cx * y - sx * z, sx * y + cx * z
-    return (x, y, z)
-
-
-def _cumulated_view_basis(atoms, bonds, coords):
-    """Return screen axes (x', y', z') that showcase allene-type perpendicular
-    substituent planes: the cumulated axis lies horizontal on screen while the
-    view direction is tilted between the two terminal plane normals so one
-    terminal reads face-on and the other edge-on.  Returns None for molecules
-    without a cumulated (C=C=C) core, which keep the default view."""
-    adj: dict[int, list[tuple[int, float]]] = {}
-    for a, b, o in bonds:
-        adj.setdefault(a, []).append((b, o))
-        adj.setdefault(b, []).append((a, o))
-    for i, a in enumerate(atoms):
-        if a["el"] in ("H", "R"):
-            continue
-        dbl = [j for j, o in adj.get(i, []) if o == 2.0]
-        if len(dbl) != 2:
-            continue
-        t1, t2 = dbl
-        axis = _vnorm(_vsub(coords[t2], coords[t1]))
-        if not axis:
-            continue
-
-        def _plane_normal(t, other):
-            for s, _o in adj.get(t, []):
-                if s in (i, other):
-                    continue
-                d = _vnorm(_vsub(coords[s], coords[t]))
-                nrm = _vnorm(_vcross(axis, d)) if d else None
-                if nrm:
-                    return nrm
-            return None
-
-        n1 = _plane_normal(t1, t2)
-        n2 = _plane_normal(t2, t1)
-        if not n1 or not n2:
-            continue
-        z = _vnorm(_vadd(_vadd(n2, _vscale(n1, 0.45)), _vscale(axis, 0.25)))
-        y = _vnorm(_vsub(axis, _vscale(z, _vdot(axis, z))))
-        if not z or not y:
-            continue
-        return (_vcross(y, z), y, z)
-    return None
-
-
 def _label_font(size: int = 22):
     try:
         from PIL import ImageFont
@@ -1032,186 +424,6 @@ def _label_font(size: int = 22):
         return ImageFont.load_default(size=size)
     except TypeError:  # Pillow < 9.2 fallback
         return ImageFont.load_default()
-
-
-# ---------------------------------------------------------------------------
-# Pseudo-3D skeleton rendering helpers (style="3d"); style="flat" keeps the
-# original flat vector look as the rollback switch.
-# ---------------------------------------------------------------------------
-
-_SPHERE_SPRITE_CACHE: dict[tuple[tuple[int, int, int], int], Any] = {}
-
-# Screen-space light direction (from upper-left, toward the viewer).
-_LIGHT_X, _LIGHT_Y, _LIGHT_Z = -0.45, -0.55, 0.70
-
-
-def _fog_color(color: tuple[int, int, int], depth01: float,
-               strength: float = 0.30) -> tuple[int, int, int]:
-    """Fade a color toward white for distant geometry (depth cue)."""
-    t = strength * (1.0 - max(0.0, min(1.0, depth01)))
-    return tuple(int(c + (255 - c) * t) for c in color)
-
-
-def _sphere_sprite(color: tuple[int, int, int], radius: float) -> Any:
-    """Deterministic Lambert-shaded sphere sprite with a specular highlight."""
-    from PIL import Image
-    r = max(2, int(round(radius)))
-    key = (color, r)
-    cached = _SPHERE_SPRITE_CACHE.get(key)
-    if cached is not None:
-        return cached
-    size = 2 * r + 3
-    sprite = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    px = sprite.load()
-    c = (size - 1) / 2.0
-    for y in range(size):
-        for x in range(size):
-            dx, dy = (x - c) / r, (y - c) / r
-            d2 = dx * dx + dy * dy
-            if d2 > 1.0:
-                continue
-            nz = math.sqrt(1.0 - d2)
-            lam = max(0.0, dx * _LIGHT_X + dy * _LIGHT_Y + nz * _LIGHT_Z)
-            spec = lam ** 8
-            col = tuple(int(min(255, ch * (0.30 + 0.80 * lam) + 235 * spec)) for ch in color)
-            dist = math.sqrt(d2) * r
-            alpha = 255 if dist <= r - 0.5 else int(255 * max(0.0, r + 0.5 - dist))
-            px[x, y] = (col[0], col[1], col[2], alpha)
-    _SPHERE_SPRITE_CACHE[key] = sprite
-    return sprite
-
-
-def _draw_cylinder_bond(draw: Any, x1: float, y1: float, x2: float, y2: float,
-                        width: int, color: tuple[int, int, int]) -> None:
-    """Fake a lit cylinder: base stroke plus a highlight stripe toward the light."""
-    draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
-    dx, dy = x2 - x1, y2 - y1
-    ln = math.hypot(dx, dy) or 1.0
-    nx, ny = -dy / ln, dx / ln
-    if nx * _LIGHT_X + ny * _LIGHT_Y < 0:
-        nx, ny = -nx, -ny
-    off = max(1.0, width * 0.25)
-    highlight = tuple(min(255, c + 70) for c in color)
-    draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
-              fill=highlight, width=max(1, width // 3))
-
-
-def render_smiles_ball_and_stick(smiles: str, output_path: Path,
-                                 img_size: tuple[int, int] = (900, 640),
-                                 style: str = "3d") -> Path | None:
-    """Render a SMILES string as a chemically accurate ball-and-stick PNG.
-
-    ``style="3d"`` adds shaded spheres, cylinder-lit bonds, mild perspective
-    and depth fog for a three-dimensional look; ``style="flat"`` keeps the
-    original flat vector rendering (rollback switch).
-    """
-    try:
-        from PIL import Image, ImageDraw
-    except ImportError:
-        return None
-    # --- Try RDKit 3D fast-path: more accurate geometry for complex molecules ---
-    rdkit_3d_result = _try_rdkit_3d(smiles)
-    if rdkit_3d_result is not None:
-        coords, atoms, bonds = rdkit_3d_result
-        if not any(c is None for c in coords) and atoms:
-            print(f"  Using RDKit 3D coordinates for {smiles!r}")
-        else:
-            rdkit_3d_result = None
-    # --- Fallback to built-in pipeline ---
-    if rdkit_3d_result is None:
-        try:
-            atoms, bonds = parse_smiles(smiles)
-            if not atoms:
-                return None
-            atoms, bonds = _expand_hydrogens(atoms, bonds)
-            coords = build_3d(atoms, bonds)
-            if any(c is None for c in coords):
-                return None
-        except Exception as exc:
-            print(f"  WARNING: skeleton build failed for {smiles!r}: {exc}")
-            return None
-    pts = [_rotate(p, math.radians(18), math.radians(28)) for p in coords]
-    basis = _cumulated_view_basis(atoms, bonds, coords)
-    if basis:
-        bx, by, bz = basis
-        pts = [(_vdot(p, bx), _vdot(p, by), _vdot(p, bz)) for p in coords]
-    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-    span = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
-    scale = min(img_size) * 0.62 / span
-    ox, oy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-    if style == "flat":
-        px = [(img_size[0] / 2 + (p[0] - ox) * scale, img_size[1] / 2 + (p[1] - oy) * scale, p[2])
-              for p in pts]
-    else:
-        # Mild perspective: nearer atoms grow up to ~14%, farther ones shrink.
-        px = []
-        for p in pts:
-            f = 8.0 / (8.0 - p[2] / span)
-            px.append((img_size[0] / 2 + (p[0] - ox) * scale * f,
-                       img_size[1] / 2 + (p[1] - oy) * scale * f,
-                       p[2]))
-    zs = [p[2] for p in px]
-    zmin, zmax = min(zs), max(zs)
-
-    def depth01(z: float) -> float:
-        return (z - zmin) / max(zmax - zmin, 1e-6)
-
-    # Preserve transparency so compositing never introduces a white rectangle
-    # around the molecule.
-    img = Image.new("RGBA", img_size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(img)
-    items = []
-    for i, j, order in bonds:
-        items.append(((px[i][2] + px[j][2]) / 2, ("bond", i, j, order)))
-    for i, a in enumerate(atoms):
-        items.append((px[i][2] + 0.01, ("atom", i, a["el"])))
-    items.sort(key=lambda t: t[0])
-    r_idx = 0
-    for _, item in items:
-        if item[0] == "bond":
-            _, i, j, order = item
-            x1, y1, x2, y2 = px[i][0], px[i][1], px[j][0], px[j][1]
-            dx, dy = x2 - x1, y2 - y1
-            ln = math.hypot(dx, dy) or 1.0
-            nx, ny = -dy / ln, dx / ln
-            # .get() guards against unconventional RDKit bond orders
-            # (e.g. 0.0 for dative/coordinate bonds) — draw a single line.
-            offsets = {1.0: [0.0], 2.0: [-5.0, 5.0], 3.0: [-7.0, 0.0, 7.0],
-                       1.5: [-4.0, 4.0]}.get(order, [0.0])
-            if style == "flat":
-                for off in offsets:
-                    draw.line([(x1 + nx * off, y1 + ny * off), (x2 + nx * off, y2 + ny * off)],
-                              fill=(120, 120, 120), width=5 if order == 1.0 else 4)
-            else:
-                bond_color = _fog_color((110, 110, 110),
-                                        depth01((px[i][2] + px[j][2]) / 2))
-                for off in offsets:
-                    _draw_cylinder_bond(draw, x1 + nx * off, y1 + ny * off,
-                                        x2 + nx * off, y2 + ny * off,
-                                        6 if order == 1.0 else 5, bond_color)
-        else:
-            _, i, el = item
-            x, y = px[i][0], px[i][1]
-            if style == "flat":
-                r = _ATOM_RADIUS.get(el, 20)
-                color = _CPK_COLORS.get(el, (150, 150, 150))
-                draw.ellipse([x - r, y - r, x + r, y + r], fill=color, outline=(20, 20, 20), width=2)
-                draw.ellipse([x - r * 0.55, y - r * 0.65, x - r * 0.05, y - r * 0.15],
-                             fill=tuple(min(255, c + 90) for c in color))
-            else:
-                depth = depth01(px[i][2])
-                r = _ATOM_RADIUS.get(el, 20) * (0.85 + 0.30 * depth)
-                color = _fog_color(_CPK_COLORS.get(el, (150, 150, 150)), depth, 0.18)
-                sprite = _sphere_sprite(color, r)
-                img.paste(sprite, (int(round(x - sprite.width / 2)),
-                                   int(round(y - sprite.height / 2))), sprite)
-            if el == "R":
-                r_idx += 1
-                draw.text((x, y), f"R{r_idx}", fill=(255, 255, 255),
-                          font=_label_font(), anchor="mm")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(output_path, format="PNG")
-    return output_path
 
 
 # Normalized (x0, y0, x1, y1) candidate structure-panel regions per layout for
@@ -2038,53 +1250,12 @@ def resolve_skeleton_smiles(features: dict[str, Any]) -> str:
 
 def render_skeleton_model(features: dict[str, Any], output_path: Path,
                           img_size: tuple[int, int] = (900, 640),
-                          style: str = "3d") -> Path | None:
+                          style: str = "2d") -> Path | None:
     """Render the verified product motif as a paper-style 2D structure."""
     smiles = resolve_skeleton_smiles(features)
     if not smiles:
         return None
     return _render_motif_2d(smiles, output_path, img_size)
-
-
-def skeleton_atom_counts(smiles: str) -> tuple[int, int] | None:
-    """(rendered atom count, R-group count) used by the AI-redraw gate.
-
-    The exact reference renderer expands implicit hydrogens into visible white
-    spheres, and the AI prompt explicitly requires preserving those spheres.
-    Counting only heavy atoms made a correct ``OCC#C*`` redraw look like nine
-    blobs against an expectation of five and falsely rejected it.  The gate is
-    deliberately only a catastrophic-hallucination check, so its expectation
-    must match every atom actually present in the reference image.
-    """
-    try:
-        atoms, bonds = parse_smiles(smiles)
-        if not atoms:
-            return None
-        atoms, bonds = _expand_hydrogens(atoms, bonds)
-    except Exception:
-        return None
-    visible = len(atoms)
-    r_count = sum(1 for a in atoms if a["el"] == "R")
-    return visible, r_count
-
-
-# ---------------------------------------------------------------------------
-# Form B: isolated AI style-transfer of the exact skeleton ("ai3d" style).
-# The model only restyles; a programmatic sanity gate must accept the redraw
-# before it replaces the deterministic skeleton, otherwise we fall back.
-# ---------------------------------------------------------------------------
-
-# Gate tuning knobs, calibrated 2026-08-06 against the programmatic flat/3D
-# renders and an accepted AI redraw (all analyzed at _GATE_SMALL_SIZE):
-_GATE_SMALL_SIZE = (450, 320)        # downscale size for gate analysis
-_GATE_INK_THRESHOLD = 235            # pixels darker than this count as ink
-_GATE_EMPTY_INK_RATIO = 0.005        # less ink than this => empty image
-_GATE_INK_EROSION = 5                # MinFilter width that erases thin bonds
-_GATE_ATOM_BLOB_MIN_PX = 8           # min surviving blob size (one atom)
-_GATE_ATOM_BLOB_RANGE = (0.5, 1.6)   # accepted blob count vs expected atoms
-_GATE_BLUE_MIN_PX = 30               # R spheres are large; no erosion needed
-_GATE_BLUE_MERGE_PX = 24             # centroid distance that merges R-sphere fragments
-_GATE_R_TOLERANCE = 1                # allowed |detected - expected| R labels
 
 
 def _blob_stats(mask: Any, min_px: int) -> list[tuple[float, float, float, int, int, int, int]]:
@@ -2175,86 +1346,6 @@ def _skeleton_content_bbox(mask: Any) -> tuple[int, int, int, int] | None:
         max(int(item[5]) for item in kept) + 1,
         max(int(item[6]) for item in kept) + 1,
     )
-
-
-def _count_blobs(mask: Any, min_px: int) -> int:
-    """Count connected 255-valued blobs of at least min_px pixels (4-neighbor)."""
-    return len(_blob_stats(mask, min_px))
-
-
-def _clustered_blob_count(
-    stats: list[tuple[float, float, float, int, int, int, int]],
-    merge_px: float,
-) -> int:
-    """Count blobs after merging fragments of one physical object.
-
-    Glossy specular bands can split a single sphere into several disconnected
-    mask blobs; fragments overlap on one axis with at most a merge_px-wide gap
-    on the other (or have centroids within merge_px) and are treated as one
-    object. Well-separated blobs stay distinct.
-    """
-    count = len(stats)
-    parent = list(range(count))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for i in range(count):
-        _, cx_i, cy_i, x0_i, y0_i, x1_i, y1_i = stats[i]
-        for j in range(i + 1, count):
-            _, cx_j, cy_j, x0_j, y0_j, x1_j, y1_j = stats[j]
-            sep_x = max(x0_i, x0_j) - min(x1_i, x1_j)
-            sep_y = max(y0_i, y0_j) - min(y1_i, y1_j)
-            aligned = (
-                (sep_x <= 0 or sep_y <= 0)
-                and sep_x <= merge_px
-                and sep_y <= merge_px
-            )
-            close = (cx_i - cx_j) ** 2 + (cy_i - cy_j) ** 2 <= merge_px * merge_px
-            if aligned or close:
-                parent[find(j)] = find(i)
-    return len({find(i) for i in range(count)})
-
-
-def _ai_redraw_gate(img: Any, expected_atoms: int, expected_r: int) -> tuple[bool, str]:
-    """Sanity-check an AI skeleton redraw: atom-blob and R-label counts.
-
-    Bonds are thin, atoms are thick: eroding the ink mask removes bonds so
-    each surviving blob approximates one atom.  Not a proof of correctness --
-    a probabilistic gate that catches catastrophic hallucinations only.
-    """
-    from PIL import Image, ImageFilter
-    small = img.resize(_GATE_SMALL_SIZE)
-    r_ch, g_ch, b_ch = small.split()
-    rp, gp, bp = r_ch.load(), g_ch.load(), b_ch.load()
-    ink = small.convert("L").point(lambda p: 255 if p < _GATE_INK_THRESHOLD else 0)
-    blue = Image.new("L", small.size, 0)
-    blp = blue.load()
-    for y in range(small.size[1]):
-        for x in range(small.size[0]):
-            rv, gv, bv = rp[x, y], gp[x, y], bp[x, y]
-            if bv >= rv + 25 and bv >= gv + 15 and bv > 90:
-                blp[x, y] = 255
-    ink_px = ink.histogram()[255]
-    if ink_px < _GATE_EMPTY_INK_RATIO * small.size[0] * small.size[1]:
-        return False, "empty_image"
-    blobs = _count_blobs(ink.filter(ImageFilter.MinFilter(_GATE_INK_EROSION)),
-                         _GATE_ATOM_BLOB_MIN_PX)
-    lo, hi = _GATE_ATOM_BLOB_RANGE
-    if not (lo * expected_atoms <= blobs <= hi * expected_atoms):
-        return False, f"atom_blobs_{blobs}_expected_about_{expected_atoms}"
-    # No erosion for the blue mask: specular highlights hole the spheres and
-    # erosion would fragment them; R spheres are large, so a size floor suffices.
-    # A highlight band can still split one sphere into disconnected fragments,
-    # so nearby fragments are clustered back into single spheres before counting.
-    blue_stats = _blob_stats(blue, _GATE_BLUE_MIN_PX)
-    r_blobs = _clustered_blob_count(blue_stats, _GATE_BLUE_MERGE_PX)
-    if abs(r_blobs - expected_r) > _GATE_R_TOLERANCE:
-        return False, f"r_labels_{r_blobs}_expected_{expected_r}"
-    return True, "gate_passed"
 
 
 def resolve_api_key(cli_value: str, base_url: str) -> str:
@@ -2815,7 +1906,7 @@ def select_best_template(templates: list[dict[str, Any]], features: dict[str, An
     """Choose a style reference by content-aware scores without a paid selector."""
     scored = [(score_template(t, features), t) for t in templates]
     scored.sort(key=lambda x: x[0], reverse=True)
-    print(f"  Template scoring results:")
+    print("  Template scoring results:")
     for s, t in scored[:5]:
         print(f"    [{s:.1f}] id={t['id']} name={t['name']} ({t['layout_type']})")
     eligible = [
@@ -3979,14 +3070,10 @@ def _build_report(args, template: dict, features: dict, prompt: str,
     return report
 
 
-
-
 _REACTION_SCHEME_ENABLED_ENV = "REVIEW_OVERVIEW_REACTION_SCHEME"
 
 
 _SCHEME_MAX_REACTANTS = 3
-
-
 
 
 def reaction_scheme_enabled() -> bool:
@@ -4248,20 +3335,6 @@ def _draft_excerpt(features: dict[str, Any], limit: int = 5000) -> str:
     return "\n[...]\n".join(part for part in parts if part)[:limit]
 
 
-def _text_list_from_data(data: dict[str, Any], key: str,
-                         min_count: int, max_len: int) -> list[str]:
-    """Validate a list-of-short-strings field from the content pack."""
-    raw = data.get(key)
-    if not isinstance(raw, list):
-        return []
-    items: list[str] = []
-    for entry in raw:
-        text = str(entry or "").strip()
-        if text and len(text) <= max_len and text not in items:
-            items.append(text)
-    return items if len(items) >= min_count else []
-
-
 def _validated_module_summaries(data, features):
     """Keep concise, section-bound display text; never truncate a scientific sentence."""
     bindings = features.get("overview_evidence_bindings") or {}
@@ -4317,8 +3390,6 @@ def _cached_overview_json(features, prompt, *, label, timeout_seconds):
     return result
 
 
-
-
 def _render_motif_2d(smiles: str, output_path: Path,
                      size: tuple[int, int] = (640, 640)) -> Path | None:
     """Render a molecule as a 2D bond-line (skeletal) structure via RDKit.
@@ -4371,7 +3442,7 @@ def _render_scheme_molecule(smi: str, out_path: Path,
 
 def render_reaction_scheme(reaction: dict[str, str], output_path: Path,
                            img_size: tuple[int, int] = (1500, 600),
-                           style: str = "3d") -> Path | None:
+                           style: str = "2d") -> Path | None:
     """Render substrate(s) -> product (+ catalyst label) as a programmatic scheme.
 
     Every molecule is drawn as a 2D bond-line structure via RDKit, without a
@@ -4655,8 +3726,6 @@ def resolve_reaction_scheme(features: dict[str, Any]) -> dict[str, str] | None:
     return None
 
 
-
-
 def main():
     parser = argparse.ArgumentParser(description="Generate review overview figure from template")
     parser.add_argument("--review-root", required=True, help="Path to review-writer project root")
@@ -4750,7 +3819,7 @@ def main():
         "key_findings": display["unassigned_findings"], "cross_cutting": display["cross_cutting"],
         "take_home": display["take_home"]}
     # Select best template
-    print(f"\nMatching templates...")
+    print("\nMatching templates...")
     best_template = select_best_template(templates, features)
     template_id = best_template["id"]
     reference_image = resolve_overview_template_image(templates_path, best_template)
@@ -4876,7 +3945,7 @@ def main():
         print(f"  Report saved to: {out_dir / 'overview_template_match.json'}", file=sys.stderr)
         sys.exit(2)
 
-    print(f"\nCalling image edit API...")
+    print("\nCalling image edit API...")
     print(f"  Base URL: {base_url}")
     print(f"  Wire API: {wire_api}")
     print(f"  Model: {args.model}")

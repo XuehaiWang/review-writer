@@ -74,6 +74,48 @@ class ModelGatewayClientTests(unittest.TestCase):
         self.assertEqual("child-job", deferred.exception.model_job_id)
         self.assertEqual(1, len(requests))
         self.assertTrue(requests[0].full_url.endswith("/model-delegations"))
+        self.assertEqual(json.loads(requests[0].data)["request_key"], deferred.exception.request_key)
+
+    def test_delegated_resume_only_reads_original_key_even_if_delegation_disabled(self):
+        with mock.patch.dict(os.environ, {"REVIEW_WRITER_DELEGATE_MODEL_CALLS": "0"}), \
+                mock.patch.object(model_gateway_client.urllib.request, "urlopen", return_value=_Response({
+                    "status": "succeeded", "output_text": '{"facts": []}',
+                })) as opened:
+            result = model_gateway_client.call_json_model(
+                "same windows in stable order", label="matrix-facts-P1", required_list="facts",
+                resume_request_key="original-request-key",
+            )
+        self.assertEqual({"facts": []}, result)
+        request = opened.call_args.args[0]
+        self.assertEqual("GET", request.get_method())
+        self.assertTrue(request.full_url.endswith("/model-delegations/original-request-key"))
+        self.assertIsNone(request.data)
+
+    def test_delegated_resume_preserves_waiting_key_and_never_reposts_terminal_or_unknown(self):
+        for status in ("queued", "running", "failed", "cancelled", "missing"):
+            with self.subTest(status=status), mock.patch.object(
+                model_gateway_client.urllib.request, "urlopen", return_value=_Response({
+                    "status": status, "model_job_id": "original-child", "error": "stopped",
+                }),
+            ) as opened:
+                error_type = (model_gateway_client.DeferredModelCall if status in {"queued", "running"}
+                              else RuntimeError)
+                with self.assertRaises(error_type) as failure:
+                    model_gateway_client.call_json_model(
+                        "prompt", label="matrix-facts-P1", resume_request_key="original-key")
+                if status in {"queued", "running"}:
+                    self.assertEqual("original-key", failure.exception.request_key)
+                self.assertEqual(["GET"], [c.args[0].get_method() for c in opened.call_args_list])
+
+        for error in (TimeoutError("lost status"), urllib.error.HTTPError(
+            "http://gateway/result", 404, "missing", {}, _Response({}),
+        )):
+            with mock.patch.object(model_gateway_client.urllib.request, "urlopen", side_effect=error) as opened, \
+                    mock.patch.object(model_gateway_client.time, "sleep"):
+                with self.assertRaises(model_gateway_client.ModelResultUnknown):
+                    model_gateway_client.call_json_model(
+                        "prompt", label="matrix-facts-P1", resume_request_key="original-key")
+                self.assertEqual(["GET"] * 3, [c.args[0].get_method() for c in opened.call_args_list])
 
     def test_uncertain_delegation_uses_read_only_recovery(self) -> None:
         requests = []
@@ -155,6 +197,44 @@ class ModelGatewayClientTests(unittest.TestCase):
 
         self.assertEqual([{"paragraph_id": "S10-p1"}], result["paragraphs"])
         self.assertNotIn("provider_debug", result)
+
+    def test_planning_json_does_not_promote_nested_object_from_truncated_answer(self) -> None:
+        output = ('{"question":"What is known?","paper_roles":['
+                  '{"paper_id":"P1","role":"main_progress"},'
+                  '{"paper_id":"P2","reason":"unfinished')
+        with mock.patch.object(
+            model_gateway_client.urllib.request,
+            "urlopen",
+            return_value=_Response({"output_text": output}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "incomplete or invalid top-level JSON"):
+                model_gateway_client.call_json_model(
+                    "plan", label="blueprint-plan-S05", top_level_only=True,
+                )
+
+    def test_planning_json_accepts_complete_fenced_object(self) -> None:
+        output = '```json\n{"question":"What is known?","purpose":"Compare routes."}\n```'
+        with mock.patch.object(
+            model_gateway_client.urllib.request,
+            "urlopen",
+            return_value=_Response({"output_text": output}),
+        ):
+            result = model_gateway_client.call_json_model(
+                "plan", label="blueprint-plan-S05", top_level_only=True,
+            )
+        self.assertEqual("What is known?", result["question"])
+
+    def test_planning_json_accepts_complete_root_with_trailing_prose(self) -> None:
+        output = '{"question":"What is known?","purpose":"Compare routes."}\nFinished.'
+        with mock.patch.object(
+            model_gateway_client.urllib.request,
+            "urlopen",
+            return_value=_Response({"output_text": output}),
+        ):
+            result = model_gateway_client.call_json_model(
+                "plan", label="blueprint-plan-S05", top_level_only=True,
+            )
+        self.assertEqual("Compare routes.", result["purpose"])
 
     def test_json_request_selects_candidate_matching_required_contract(self) -> None:
         output = (

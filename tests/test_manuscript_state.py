@@ -281,7 +281,7 @@ The reported systems support a bounded comparison [1, 2].
         self.assertNotIn("Scheme 7", rendered)
         self.assertNotIn("Table 4", rendered)
 
-    def test_prose_dense_table_uses_paginated_longtable(self) -> None:
+    def test_prose_dense_table_uses_page_sized_wide_floats(self) -> None:
         explanation = (
             "This evidence record preserves the reported substrates, conditions, "
             "outcome, interpretation, and limitations without removing scientific detail. "
@@ -304,11 +304,15 @@ The reported systems support a bounded comparison [1, 2].
             }
         )
 
-        self.assertIn(r"\begin{longtable}", rendered)
-        self.assertNotIn(r"\begin{table*}", rendered)
+        # Long tables are emitted as page-sized wide floats, never a
+        # single-column longtable, so no forced page break leaves a blank page.
+        self.assertIn(r"\begin{table*}", rendered)
+        self.assertNotIn(r"\begin{longtable}", rendered)
+        self.assertNotIn(r"\clearpage\onecolumn", rendered)
+        self.assertIn("(1/", rendered)
         self.assertIn("System 15", rendered)
 
-    def test_oversized_longtable_row_is_split_without_losing_text(self) -> None:
+    def test_oversized_row_is_split_without_losing_text(self) -> None:
         tokens = [f"evidence{index:04d}" for index in range(180)]
         rendered = _table(
             {
@@ -318,7 +322,8 @@ The reported systems support a bounded comparison [1, 2].
             }
         )
 
-        self.assertIn(r"\begin{longtable}", rendered)
+        self.assertIn(r"\begin{table*}", rendered)
+        self.assertNotIn(r"\clearpage\onecolumn", rendered)
         self.assertEqual(21, rendered.count("evidence0000"))
         self.assertEqual(21, rendered.count("evidence0179"))
 

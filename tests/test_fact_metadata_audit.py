@@ -35,7 +35,8 @@ def test_hydration_preserves_exact_audit_and_verdict(status):
     before = deepcopy(result)
     assert not fact_needs_verification(result)
     assert result == before  # Compatibility read never rewrites the record.
-    assert not fact_is_usable(result)  # Context-only is never upgraded.
+    assert not fact_is_usable(result, purpose="detail")  # Context-only is never direct.
+    assert (not fact_is_usable(result)) == (status == "rejected")
     assert fact_processing_state([result], {})["processing"]["verification"] == "completed"
 
 

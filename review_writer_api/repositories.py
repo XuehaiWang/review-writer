@@ -18,35 +18,21 @@ from review_writer_core.workspace import WorkspaceConfigurationError, WorkspaceP
 from .database import Project, database_session, utc_now
 from .job_lifecycle import cancel_project_jobs
 from .model_catalog import DEFAULT_MODEL_TIER, resolve_model_tier
-from .workflow_models import WorkflowJob, WorkflowStageState
+from review_writer_core.workflow.artifacts import (
+    MATRIX as MATRIX_LOGICAL_NAME,
+    PLANNING_OUTLINE as OUTLINE_LOGICAL_NAME,
+)
+from .workflow_models import (
+    WorkflowArtifact,
+    WorkflowCurrentArtifact,
+    WorkflowJob,
+    WorkflowStageState,
+)
+from .workflow_contracts import COMPLETED_STAGE_STATUSES, WORKFLOW_CHECKPOINTS, current_checkpoint
 
 
 class ProjectOperationError(ValueError):
     pass
-
-
-PRIMARY_WORKFLOW_STAGES = (
-    "discovery",
-    "matrix",
-    "blueprint",
-    "sections",
-    "figure-review",
-    "figures",
-    "draft",
-    "final",
-)
-COMPLETED_STAGE_STATUSES = {"approved", "completed", "success", "succeeded"}
-
-
-def current_stage_from_states(stage_states: dict[str, object]) -> str:
-    """Return the first primary stage that still needs work or human review."""
-
-    for stage_id in PRIMARY_WORKFLOW_STAGES:
-        value = stage_states.get(stage_id)
-        status = str(value.get("status") if isinstance(value, dict) else value or "").casefold()
-        if status not in COMPLETED_STAGE_STATUSES:
-            return stage_id
-    return PRIMARY_WORKFLOW_STAGES[-1]
 
 
 @dataclass(frozen=True)
@@ -61,6 +47,9 @@ class ProjectRecord:
     model_tier: str = DEFAULT_MODEL_TIER
     current_stage: str = "discovery"
     stage_states: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
+    # Health of the outline check that owns the 03/04 boundary:
+    # ready | not_ready | unknown (artifact unreadable) | unchecked (list view).
+    outline_state: str = field(default="unchecked", repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -134,12 +123,12 @@ class LocalProjectRepository:
             discovery_status=str(payload.get("discovery_status") or "pending"),
             completed_stages=tuple(
                 stage_id
-                for stage_id in PRIMARY_WORKFLOW_STAGES
+                for stage_id in WORKFLOW_CHECKPOINTS
                 if stage_id in stage_states
             ),
             taxonomy_profile=str(payload.get("taxonomy_profile") or "chemistry_general"),
             model_tier=DEFAULT_MODEL_TIER,
-            current_stage=current_stage_from_states(stage_states),
+            current_stage=current_checkpoint(stage_states),
             stage_states=stage_states,
         )
 
@@ -251,7 +240,7 @@ class HostedProjectRepository:
     def _record(project: Project) -> ProjectRecord:
         states = project.stage_states if isinstance(project.stage_states, dict) else {}
         completed = tuple(
-            stage_id for stage_id in PRIMARY_WORKFLOW_STAGES
+            stage_id for stage_id in WORKFLOW_CHECKPOINTS
             if (value := states.get(stage_id)) is not None
             if str(value.get("status") if isinstance(value, dict) else value).casefold()
             in COMPLETED_STAGE_STATUSES
@@ -269,13 +258,54 @@ class HostedProjectRepository:
             completed_stages=completed,
             taxonomy_profile=project.taxonomy_profile,
             model_tier=project.model_tier or DEFAULT_MODEL_TIER,
-            current_stage=(
-                current_stage_from_states(states)
-                if states
-                else project.current_stage or PRIMARY_WORKFLOW_STAGES[0]
-            ),
+            current_stage=current_checkpoint(states) if states else WORKFLOW_CHECKPOINTS[0],
             stage_states=dict(states),
         )
+
+    def outline_boundary_inputs(
+        self, user_id: str, project_ids: list[str]
+    ) -> dict[str, dict[str, str]]:
+        """Facts the 03/04 boundary needs, for every project, in one query.
+
+        Workspace navigation decides this boundary for each card. Reading the
+        current outline and matrix artifact rows once avoids opening one outline
+        file per project. Unknown or legacy outlines simply stay absent, and the
+        caller falls back to the full check for that project alone.
+        """
+        wanted = {uuid.UUID(str(item)) for item in project_ids if str(item)}
+        if not wanted:
+            return {}
+        with database_session(self.session_factory) as session:
+            rows = session.execute(
+                select(
+                    WorkflowCurrentArtifact.project_id,
+                    WorkflowCurrentArtifact.logical_name,
+                    WorkflowArtifact.id,
+                    WorkflowArtifact.metadata_json,
+                )
+                .join(
+                    WorkflowArtifact,
+                    WorkflowArtifact.id == WorkflowCurrentArtifact.artifact_id,
+                )
+                .where(
+                    WorkflowCurrentArtifact.project_id.in_(tuple(wanted)),
+                    WorkflowCurrentArtifact.logical_name.in_(
+                        (OUTLINE_LOGICAL_NAME, MATRIX_LOGICAL_NAME)
+                    ),
+                )
+            ).all()
+        inputs: dict[str, dict[str, str]] = {}
+        for project_uuid, logical_name, artifact_id, metadata in rows:
+            entry = inputs.setdefault(str(project_uuid), {})
+            if logical_name == MATRIX_LOGICAL_NAME:
+                entry["matrix_artifact_id"] = str(artifact_id)
+                continue
+            entry["outline_artifact_id"] = str(artifact_id)
+            value = metadata if isinstance(metadata, dict) else {}
+            for key in ("outline_source_matrix_artifact_id", "outline_complete", "outline_has_markdown"):
+                if value.get(key) is not None:
+                    entry[key] = str(value.get(key))
+        return inputs
 
     def list_for_user(self, user_id: str) -> list[ProjectRecord]:
         user_uuid = uuid.UUID(user_id)
@@ -340,7 +370,6 @@ class HostedProjectRepository:
                 ),
                 model_tier=selected_tier,
                 status="active",
-                current_stage="discovery",
                 stage_states={},
             )
             session.add(project)
@@ -404,7 +433,7 @@ class HostedProjectRepository:
             now = utc_now()
             stale_stages = {"discovery"}
             if matrix_entered:
-                stale_stages.update(PRIMARY_WORKFLOW_STAGES[1:])
+                stale_stages.update(WORKFLOW_CHECKPOINTS[1:])
             for stage_id in stale_stages:
                 state = states_by_stage.get(stage_id)
                 stored = stored_states.get(stage_id)
@@ -427,7 +456,6 @@ class HostedProjectRepository:
 
             project.taxonomy_profile = selected_profile
             project.stage_states = stored_states
-            project.current_stage = "discovery"
             project.updated_at = now
             session.flush()
             return ProjectTaxonomyUpdateResult(

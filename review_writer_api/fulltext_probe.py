@@ -124,22 +124,31 @@ def probe(row: dict) -> dict:
     return {"state": "not_found"}
 
 
-def cached_check(row: dict) -> dict:
-    key = hashlib.sha256(json.dumps([row.get(k) for k in ("doi", "pdf_url", "crossref_pdf_url")], sort_keys=True).encode()).hexdigest()
+def _probe_key(row: dict) -> str:
+    return hashlib.sha256(json.dumps([row.get(k) for k in ("doi", "pdf_url", "crossref_pdf_url")], sort_keys=True).encode()).hexdigest()
+
+
+def _submit_check(row: dict) -> tuple[str, object | None, dict | None]:
+    """Start or reuse one bounded probe. Returns (key, future, cached result)."""
+
+    key = _probe_key(row)
     with _lock:
         cached = _cache.get(key)
         if cached and cached[0] > time.monotonic():
-            return dict(cached[1])
+            return key, None, dict(cached[1])
         future = _inflight.get(key)
         if future is None:
             # Never allow page refreshes or many users to grow an unbounded queue.
             if len(_inflight) >= 16:
-                return {"state": "unknown"}
+                return key, None, {"state": "unknown"}
             future = _pool.submit(probe, dict(row))
             _inflight[key] = future
+    return key, future, None
+
+
+def _resolve_check(key: str, future) -> dict:
     try:
-        result = future.result()
-        result = {**result, "checked_at": int(time.time())}
+        result = {**future.result(), "checked_at": int(time.time())}
         with _lock:
             _cache[key] = (time.monotonic() + (120 if result["state"] == "unknown" else 1800), result)
             _cache.move_to_end(key)
@@ -149,3 +158,28 @@ def cached_check(row: dict) -> dict:
     finally:
         with _lock:
             _inflight.pop(key, None)
+
+
+def cached_check(row: dict) -> dict:
+    key, future, cached = _submit_check(row)
+    return cached if cached is not None else _resolve_check(key, future)
+
+
+def cached_check_many(rows: dict[str, dict]) -> dict[str, dict]:
+    """Probe several candidates through the same cache and bounded pool.
+
+    Every probe is submitted before any is awaited, so a page of external
+    candidates costs one request and still runs at the pool's concurrency.
+    """
+
+    started: list[tuple[str, str, object]] = []
+    results: dict[str, dict] = {}
+    for candidate_id, row in rows.items():
+        key, future, cached = _submit_check(row)
+        if cached is not None:
+            results[candidate_id] = cached
+        else:
+            started.append((candidate_id, key, future))
+    for candidate_id, key, future in started:
+        results[candidate_id] = _resolve_check(key, future)
+    return results

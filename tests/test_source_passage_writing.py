@@ -31,6 +31,217 @@ def task():
             "allowed_papers": ["A", "B"], "questions_to_answer": ["What was reported?"], "writing_objective": "Compare reported conditions."}
 
 
+def first_unit_span(prompt):
+    payload = json.loads(prompt[prompt.index('{"task":'):])
+    return {"unit_id": payload["sources"][0]["source_units"][0]["unit_id"]}
+
+
+def test_partial_upgrade_keeps_completed_chapter_and_resumes_original_request(tmp_path, monkeypatch):
+    stage = tmp_path / "review-projects/demo/02_section_drafting"
+    planning = stage.parent / "01_matrix_outline"
+    stage.mkdir(parents=True)
+    planning.mkdir()
+    tasks = [{**task(), "section_id": sid, "heading": sid} for sid in ("S01", "S02")]
+    for path, payload in {
+        stage / "section_tasks.json": tasks,
+        stage / "section_evidence.json": {"sections": [
+            {"section_id": t["section_id"], "retrieval_mode": "lexical", "hits": [source()]} for t in tasks]},
+        planning / "literature_matrix.json": {"rows": [{"paper_id": "A", "title": "Pilot"}]},
+        planning / "section_blueprint.json": {"sections": tasks},
+    }.items():
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(pipeline.sys, "argv", [str(SCRIPT), "--review-root", str(tmp_path),
+        "--project-id", "demo", "--api-key", "test", "--model", "test", "--audit-mode", "full"])
+    monkeypatch.setattr(pipeline, "load_dotenv", lambda *a: {})
+    monkeypatch.setattr(pipeline, "load_blueprint_rule_pack", lambda *a: "Original rules")
+    monkeypatch.setattr(pipeline, "load_cross_study_synthesis_skill", lambda *a: "Original synthesis")
+    failed, writes = [], []
+    def model(prompt, schema, *a, label, **kw):
+        if label == "section-source-writing":
+            payload = json.loads(prompt[prompt.index('{"task":'):])
+            writes.append(payload["task"]["heading"])
+            return {"paragraphs": [{"reader_takeaway": "Pilot result", "role": "anchor_case",
+                "text": source()["content"], "claims": [{"text": source()["content"],
+                "claim_kind": "reported_finding", "support_spans": [first_unit_span(prompt)]}]}]}
+        payload = json.loads(prompt[prompt.index('{"claims":'):])
+        cid = payload["claims"][0]["claim_id"]
+        if cid.startswith("S02") and not failed:
+            failed.append(True)
+            raise RuntimeError("Temporary provider error")
+        return {"claims": [{"claim_id": cid, "status": "supported", "text": "", "reason": ""}]}
+    monkeypatch.setattr(pipeline, "call_structured_llm", model)
+    with pytest.raises(SystemExit, match="Retry the job"):
+        pipeline.main()
+    path = stage / "section_checkpoints.json"
+    before = json.loads(path.read_text(encoding="utf-8"))
+    assert set(before["entries"]) == {"S01"}
+    output = before['entries']['S01']['output']
+    from review_writer_core.manuscript_coherence import current_records
+    assert current_records(output['paragraphs'], output['content_records'])['S01-p1']['reader_takeaway'] == 'Pilot result'
+    assert before["authoring_states"]["S02"]["state"]["request_snapshot"]
+    monkeypatch.setattr(pipeline, "load_blueprint_rule_pack", lambda *a: "Upgraded rules")
+    monkeypatch.setattr(pipeline, "load_cross_study_synthesis_skill", lambda *a: "Upgraded synthesis")
+    assert pipeline.main() == 0
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["entries"]["S01"] == before["entries"]["S01"]
+    assert set(after["entries"]) == {"S01", "S02"}
+    assert sorted(writes) == ["S01", "S02"]
+
+
+@pytest.mark.parametrize("papers", [["A"], ["A", "B"]])
+def test_editorial_selection_preserves_sources_exceptions_and_legacy_plans(papers):
+    rows = [source(paper=p, key=p, content=("Pd dba ·CHCl gave a result." if p == "A"
+                                          else "The same intervention failed in a second population.")) for p in papers]
+    current = {**task(), "primary_papers": papers,
+               "avoid_points": ["Report the exact conditions when supported."],
+               "requested_length": "Short"}
+    before = deepcopy((current, rows))
+    class Captured(Exception): pass
+    calls = []
+    def capture(prompt, schema, label):
+        calls.append(label)
+        payload = json.loads(prompt[prompt.index('{"task":'):])
+        assert len(payload["sources"]) == len(rows)
+        assert [s["content"] for s in payload["sources"]] == [s["content"] for s in rows]
+        assert payload["task"]["avoid_points"] == current["avoid_points"]
+        assert "Never guess missing subscripts" in prompt
+        assert "Revisit it only to advance a distinct supported implication" in prompt
+        assert "without repeating conditions and results" in prompt
+        assert "when absent, reason directly from the supplied evidence" in prompt
+        assert "retaining decisive exceptions" in prompt
+        assert "explicit user-requested detail" in prompt
+        assert "smallest sufficient" in prompt
+        assert "A paragraph that reports no method of its own may use an empty result_context" in prompt
+        assert "the reader table is projected from result_context alone" in prompt
+        assert list(schema["properties"]["paragraphs"]["items"]["properties"]) == [
+            "reader_takeaway", "role", "evidence_uses", "text", "claims"]
+        assert prompt.count("Revisit it only") == 1
+        raise Captured
+    with pytest.raises(Captured):
+        write_from_sources(section_id="S01", task=current, evidence=rows + [rows[0]], context="", call=capture)
+    assert calls == ["section-source-writing"]
+    assert (current, rows) == before
+
+
+def test_editorial_policy_does_not_turn_empty_evidence_into_a_model_call():
+    def no_call(*args, **kwargs):
+        pytest.fail("Empty evidence must not incur a model call")
+    writing, _, report = write_from_sources(section_id="S01", task=task(), evidence=[], context="", call=no_call)
+    assert writing["claims"] == []
+    assert report["omitted"] == [{"reason": "no_registered_passage"}]
+
+
+def test_retrieval_checks_remain_on_original_task_but_not_chapter_responsibilities():
+    from review_writer_core.section_narrative_contracts import build_section_writing_task
+    from review_writer_core.stages.sections.execution import chapter_responsibilities
+    original = {**task(), "review_problem": "What limits transfer to another population?",
+                "questions_to_answer": ["Find all reported doses and response rates."],
+                "retrieval_directions": ["Retrieve the full results and negative cases."]}
+    snapshot = deepcopy(original)
+    projected = build_section_writing_task(original)
+    assert projected["argument_question"] == original["review_problem"]
+    assert projected["evidence_checks"]["questions"] == original["questions_to_answer"]
+    assert "not_a_prose_checklist" in projected["evidence_checks"]["usage"]
+    responsibilities = chapter_responsibilities([original])[0]
+    assert "questions_to_answer" not in responsibilities
+    assert responsibilities["review_problem"] == original["review_problem"]
+    assert original == snapshot
+
+
+def test_shared_synthesis_resource_no_longer_prescribes_repeated_five_step_units():
+    rules = pipeline.load_cross_study_synthesis_skill()
+    assert "not a five-step sequence" in rules
+    assert "prefer this order" not in rules
+    assert "Do not directly compare" in rules
+
+
+def test_sparse_qualitative_prose_is_published_and_reused_without_extra_review():
+    row = source(content="The intervention was feasible in this pilot cohort.")
+    saved, calls = {}, []
+    def model(prompt, schema, label):
+        calls.append(label)
+        assert label == "section-source-writing"
+        return {"paragraphs": [{"reader_takeaway": "Pilot feasibility is bounded to this cohort.",
+                                "role": "anchor_case", "text": row["content"],
+                                "claims": [prose_claim(row["content"], row["content"])]}]}
+    def save(state):
+        saved.clear()
+        saved.update(deepcopy(state))
+    args = dict(section_id="S01", task=task(), evidence=[row], context="", call=model,
+                audit_mode="selective", save_state=save)
+    first = write_from_sources(**args)
+    second = write_from_sources(**args, resume_state=deepcopy(saved))
+    assert calls == ["section-source-writing"]
+    assert first == second
+    assert first[0]["claims"][0]["claim"] == row["content"]
+    assert first[2]["omitted"] == []
+
+
+@pytest.mark.parametrize("channel,ceiling", [("abstract", "abstract_report_only"), ("body", "direct_source_report")])
+def test_writer_projects_current_sources_without_retrieval_orders_or_repeated_objective(channel, ceiling):
+    from review_writer_core.section_narrative_contracts import build_section_writing_guidance
+    current_task = {**task(), "core_argument": task()["writing_objective"],
+                    "retrieval_directions": ["Retrieve the missing full text"],
+                    "avoid_points": ["Keep the explicit abstract-only review scope."] * 2,
+                    "notes": "User note: do not compare incomparable interventions.",
+                    "requested_length": "Concise, but preserve limitations",
+                    "paper_roles": [{"paper_id": "A", "role": "main_progress", "reason": "Full text remains to be retrieved"}]}
+    row = {**source(), "source_channel": channel, "assertion_ceiling": ceiling}
+    before = deepcopy((current_task, row))
+    class Captured(Exception): pass
+    calls = []
+    def capture(prompt, schema, label):
+        calls.append(label)
+        payload = json.loads(prompt[prompt.index('{"task":'):])
+        assert "retrieval_directions" not in payload["task"]
+        assert "core_argument" not in payload["task"]
+        assert payload["task"]["planning_snapshot"]["original_objective"] == task()["writing_objective"]
+        assert len(payload["task"]["avoid_points"]) == 1
+        assert payload["sources"][0]["assertion_ceiling"] == ceiling
+        assert payload["sources"][0]["source_channel"] == channel
+        assert payload["writing_guidance"] == build_section_writing_guidance(current_task)
+        assert "planning_snapshot_not_current_retrieval_status" in payload["writing_guidance"]["usage"]
+        assert payload["writing_guidance"]["notes"] == current_task["notes"]
+        assert payload["writing_guidance"]["requested_length"] == current_task["requested_length"]
+        assert "Available passages do not imply complete full-text coverage" in prompt
+        assert "retain explicit user scope" in prompt
+        raise Captured
+    with pytest.raises(Captured):
+        write_from_sources(section_id="S01", task=current_task, evidence=[row], context="", call=capture)
+    assert calls == ["section-source-writing"]
+    assert (current_task, row) == before
+
+
+def test_projection_keeps_distinct_arguments_and_non_english_user_constraints():
+    from review_writer_core.section_narrative_contracts import build_section_writing_task
+    current_task = {**task(), "core_argument": "Do not generalize this result.",
+                    "avoid_points": ["仅限摘要证据", "不要删除失败案例"],
+                    "questions_to_answer": ["为何失败？", "为何失败？", "边界是什么？"]}
+    result = build_section_writing_task(current_task)
+    assert result["core_argument"] == current_task["core_argument"]
+    assert result["avoid_points"] == current_task["avoid_points"]
+    assert result["evidence_checks"]["questions"] == ["为何失败？", "边界是什么？"]
+    assert "questions_to_answer" not in result
+
+
+def test_hosted_writer_uses_shared_schema_envelope(monkeypatch):
+    from review_writer_core.model_gateway_client import structured_json_prompt
+    captured = []
+    schema = {"type": "object", "description": "中文字段"}
+    original = deepcopy(schema)
+    monkeypatch.setattr(pipeline, "gateway_configured", lambda: True)
+    def gateway(prompt, **kwargs):
+        captured.append(prompt)
+        return {"paragraphs": []}
+    monkeypatch.setattr(pipeline, "call_gateway_json", gateway)
+    result = pipeline.call_structured_llm("Write", schema, "unused", "unused", "unused",
+                                          label="test", schema_name="test")
+    assert result == {"paragraphs": []}
+    assert captured == [structured_json_prompt("Write", schema)]
+    assert "中文字段" in captured[0]
+    assert schema == original
+
+
 def test_empty_source_writer_gets_one_bounded_repair():
     calls = []
     claim = "At 25 C, Catalyst A achieved 90% degradation after 60 minutes."
@@ -306,7 +517,7 @@ def test_partial_chapter_finishes_as_limited_evidence_and_reuses_checkpoint(tmp_
         if label == "section-source-writing":
             return {"paragraphs": [{"role": "anchor_case", "claims": [
                 {"text": text, "claim_kind": "reported_finding", "support_spans": [
-                    {"evidence_key": "a", "quote": evidence[0]["content"]}]}
+                        first_unit_span(prompt)]}
                 for text in (evidence[0]["content"], bad)]}]}
         verdict = {"claim_id": "S01-p1-C02", "status": "unresolved", "text": "",
                    "reason": "No source supports this formula or yield."}
@@ -327,6 +538,78 @@ def test_partial_chapter_finishes_as_limited_evidence_and_reuses_checkpoint(tmp_
         {"planning_mode": "evidence_first_source_writing", "sections": [entry["writing"]]}, package)
     assert pipeline.main() == 0
     assert calls == ["section-source-writing", "section-used-claim-check", "section-source-content-repair"]
+
+
+def test_verified_fact_relations_reach_first_writer_without_extra_call():
+    from review_writer_core.scientific_facts import attach_fact_to_evidence, FACT_VALIDATION_VERSION, review_fingerprint
+    evidence = source()
+    fact = {"paper_id": evidence["paper_id"], "field_id": "quantitative_results", "value": evidence["content"],
+            "support_level": "direct", "evidence_refs": [{"evidence_key": evidence["evidence_key"]}],
+            "study_ownership": "own_results", "experiment_id": "experiment-B",
+            "qualifiers": {"scope": "tested system only"}, "epistemic_status": "direct_source_report"}
+    fact["verification"] = {"contract": FACT_VALIDATION_VERSION, "status": "supported",
+                            "input_fingerprint": review_fingerprint(fact)}
+    attach_fact_to_evidence(evidence, fact)
+    original = deepcopy(evidence)
+    projected, budget = pipeline.bounded_evidence_payload([evidence], char_budget=55_000)
+    assert budget["serialized_characters"] <= 55_000
+    assert "evidence_refs" not in projected[0]["fact_bindings"][0]
+    calls = []
+    def call(prompt, _schema, label):
+        calls.append(prompt)
+        return {"paragraphs": [{"text": evidence["content"],
+                                "claims": [prose_claim(evidence["content"], evidence["content"])]}]}
+    write_from_sources(section_id="S01", task=task(), evidence=[evidence], prompt_evidence=projected,
+                       context="", call=call, audit_mode="selective")
+    assert len(calls) == 1
+    assert '"study_ownership": "own_results"' in calls[0]
+    assert '"experiment_id": "experiment-B"' in calls[0]
+    assert '"scope": "tested system only"' in calls[0]
+    assert evidence == original
+
+
+def test_compact_fact_view_cannot_forge_or_resurrect_invisible_support():
+    from review_writer_core.scientific_facts import attach_fact_to_evidence, review_fingerprint, FACT_VALIDATION_VERSION
+    a, b = source(), source(key="b", content="The catalyst loading was 5 mol%.")
+    fact = {"fact_id": "multi", "paper_id": "A", "field_id": "quantitative_results",
+            "value": "Catalyst A degraded 90% at a loading of 5 mol%.", "support_level": "direct",
+            "study_ownership": "own_results", "experiment_id": "test-A",
+            "evidence_refs": [{"evidence_key": s["evidence_key"], "source_lineage_hash": "v1"} for s in (a, b)],
+            "support_spans": [{"evidence_key": s["evidence_key"], "support_excerpt": s["content"]} for s in (a, b)]}
+    fact["verification"] = {"contract": FACT_VALIDATION_VERSION, "status": "supported",
+                            "input_fingerprint": review_fingerprint(fact)}
+    attach_fact_to_evidence(a, fact)
+    full = [a, b]
+    projected, _ = pipeline.bounded_evidence_payload(full, char_budget=55_000)
+    class Captured(BaseException):
+        pass
+    def capture(rows, canonical=None):
+        prompts = []
+        def call(prompt, _schema, _label):
+            prompts.append(json.loads(prompt[prompt.index('{"task":'):]))
+            raise Captured()
+        with pytest.raises(Captured):
+            write_from_sources(section_id="S01", task=task(), evidence=canonical or full,
+                               prompt_evidence=rows, context="", call=call)
+        return [f for s in prompts[0]["sources"] for f in s["verified_facts"]]
+    assert capture(projected)[0]["experiment_id"] == "test-A"
+    forged = deepcopy(projected)
+    forged[0]["fact_bindings"][0]["value"] = "Invented 100% yield."
+    forged[0]["paper_id"] = "FOREIGN"
+    assert capture(forged)[0]["value"] == fact["value"]
+    assert capture(projected[:1]) == []  # Other supporting chunk omitted.
+    clipped = deepcopy(projected)
+    clipped[1]["content"] = "The catalyst loading"
+    assert capture(clipped) == []
+    stale = deepcopy(full)
+    stale[1]["source_lineage_hash"] = "v2"
+    assert capture(projected, stale) == []
+    tampered = deepcopy(full)
+    tampered[0]["fact_bindings"][0]["support_spans"][0]["support_excerpt"] = "An unsupported experiment."
+    assert capture(projected, tampered) == []
+    rejected = deepcopy(full)
+    rejected[0]["fact_bindings"][0]["verification"]["status"] = "rejected"
+    assert capture(projected, rejected) == []
 
 
 def test_section_thread_and_presentation_reach_writer_and_style_does_not_reject_facts():
@@ -382,10 +665,21 @@ def test_introduction_uses_background_problem_scope_guidance_without_extra_calls
 
 
 def test_paragraph_and_chapter_guidance_stays_inside_existing_writing_call():
-    from review_writer_core.stages.sections.source_writing import PARAGRAPH_GUIDANCE
+    from review_writer_core.stages.sections.source_writing import ARGUMENT_USE_GUIDANCE
     _, _, _, calls = write()
-    assert PARAGRAPH_GUIDANCE in calls[0][1]
+    assert ARGUMENT_USE_GUIDANCE in calls[0][1]
+    assert "Cover every writeable primary paper" in calls[0][1]
+    assert "compare the claims within each paragraph" in calls[0][1]
+    assert "Prior work quoted in a primary paper's introduction is context" in calls[0][1]
+    assert "Shared evidence alone is not duplication" in calls[1][1]
     assert '"primary_papers": ["A"]' in calls[0][1]
+    assert len(calls) == 2
+
+
+def test_primary_contribution_recovery_is_navigation_not_a_source_verdict():
+    evidence = [{**source(), "question_ids": ["primary_contribution"]}]
+    _, _, _, calls = write(evidence=evidence)
+    assert "Candidate primary-paper body passage; verify that it reports this study's own result." in calls[0][1]
     assert len(calls) == 2
 
 
@@ -579,6 +873,8 @@ def test_unsupported_ranking_is_narrowed_once_without_extracting_all_paper_facts
     writing, _, report, calls = write(evidence, text="Catalyst B is superior to A.", audit_status="narrowed", replacement=safe, span=spans)
     assert writing["claims"][0]["claim"] == safe
     assert report["narrowed"] and not report["omitted"] and len(calls) == 2
+    assert 'reader_takeaway' not in writing['paragraphs'][0]
+    assert 'evidence_uses' not in writing['paragraphs'][0]
 
 
 def test_audit_cannot_introduce_unquoted_numbers_or_new_sources():
@@ -737,7 +1033,7 @@ def test_real_generator_without_fact_cards_finishes_and_reuses_checkpoint(tmp_pa
     def model(prompt, schema, *args, label, **kwargs):
         calls.append(label)
         if label == "section-source-writing":
-            return {"paragraphs": [{"role": "anchor_case", "claims": [{"text": evidence[0]["content"], "support_spans": [{"evidence_key": "a", "quote": evidence[0]["content"]}]}]}]}
+            return {"paragraphs": [{"role": "anchor_case", "claims": [{"text": evidence[0]["content"], "support_spans": [first_unit_span(prompt)]}]}]}
         if fail_review and calls.count("section-used-claim-check") == 1:
             raise RuntimeError("Provider temporarily unavailable")
         return {"claims": [{"claim_id": "S01-p1-C01", "status": "supported", "text": evidence[0]["content"]}]}
@@ -796,7 +1092,7 @@ def test_parallel_pipeline_preserves_outline_order_checkpoints_and_citations(tmp
             barrier.wait(timeout=4)
             return {"paragraphs": [{"role": "anchor_case", "reader_takeaway": "Result", "claims": [
                 {"text": source()["content"], "claim_kind": "reported_finding",
-                 "support_spans": [{"evidence_key": "E001", "quote": source()["content"]}],
+                 "support_spans": [first_unit_span(prompt)],
                  "fact_ids": [], "result_context": []}]}]}
         data = json.loads(prompt[prompt.index('{"claims":'):])
         return {"claims": [{"claim_id": c["claim_id"], "status": "supported", "text": "", "reason": ""} for c in data["claims"]]}
@@ -961,11 +1257,11 @@ def test_style_failure_keeps_original_and_does_not_repeat_on_resume():
         saved.update(deepcopy(value))
     args = dict(section_id="S01", task=task(), evidence=evidence, context="", call=model, audit_mode="selective", save_state=save)
     writing, _, report = write_from_sources(**args)
-    assert writing["claims"][0]["claim"] == text and report["style_repair_attempted"]
+    assert writing["claims"][0]["claim"] == text and not report["style_repair_attempted"]
     assert writing["claims"][0]["source_verification"]["status"] == "program_checked"
-    assert len(calls) == 2
+    assert len(calls) == 1
     write_from_sources(**args, resume_state=saved)
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 def test_scientific_review_failure_resumes_draft_without_repeating_generation():
@@ -1036,7 +1332,7 @@ def test_successful_style_repair_replays_exact_result_without_new_call():
         verdict=lambda data: {"claims": [{"claim_id": "S01-p1-C01", "status": "rewritten", "text": revised, "reason": "Rephrased source overlap."}]})
     snapshots = []
     args = dict(section_id="S01", task=task(), evidence=[source(content=original)], context="", call=model,
-                audit_mode="selective", save_state=lambda value: snapshots.append(deepcopy(value)))
+                audit_mode="full", save_state=lambda value: snapshots.append(deepcopy(value)))
     first = write_from_sources(**args)
     resumed = write_from_sources(**args, resume_state=snapshots[-1])
     assert first == resumed and len(calls) == 2
@@ -1138,9 +1434,9 @@ def test_stale_automatic_word_budget_is_recalculated_but_custom_budget_is_preser
     section = {"section_role": "body", "primary_papers": [], "target_words": 8050,
                "depth_contract": {"target_paragraph_count": 4, "target_word_min": 6440,
                                   "target_word_max": 10062, "diagnostic_policy": "derived_not_hard_word_quota"}}
-    assert resolve_section_depth_contract(section)["target_word_min"] == 650
+    assert resolve_section_depth_contract(section)["target_word_min"] == 0
     section["depth_contract"]["diagnostic_policy"] = "user_defined"
-    assert resolve_section_depth_contract(section)["target_word_min"] == 6440
+    assert resolve_section_depth_contract(section)["target_word_min"] == 0
 
 
 @pytest.mark.parametrize("malformed", [None, {}, {"repairs": None}, {"repairs": [None]}])

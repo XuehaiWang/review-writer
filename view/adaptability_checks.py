@@ -134,7 +134,7 @@ class AdaptabilityChecks(unittest.TestCase):
             {"rule_pack": general["name"], "rule_pack_path": general["path"],
              "rule_pack_sha256": general["sha256"]},
         )
-        self.assertIn("General scientific review style", rules)
+        self.assertIn("Scientific safeguards for initial review writing", rules)
         self.assertNotIn("ATA Introduction", rules)
 
     def test_section_writer_loads_application_rules_for_hosted_workspace(self) -> None:
@@ -150,7 +150,7 @@ class AdaptabilityChecks(unittest.TestCase):
                     "rule_pack_sha256": selected["sha256"],
                 },
             )
-        self.assertIn("Organic Review Style", rules)
+        self.assertIn("Chemical safeguards for initial review writing", rules)
 
     def test_blueprint_logic_is_generic_without_injecting_domain_rules(self) -> None:
         self.assertEqual(

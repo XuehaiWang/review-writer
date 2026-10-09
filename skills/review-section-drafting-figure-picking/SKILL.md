@@ -51,13 +51,18 @@ local output files alone do not advance a Web stage.
 
 Independent chapters run with at most two workers. Both receive the same
 chapter responsibilities (questions, boundaries, paper roles and assignments),
-which are also checked in the existing audit. Optional `depends_on_sections`
+which guide prose boundaries but do not force unrelated completed chapters to
+be regenerated. Per-chapter fingerprints validate that chapter's topic,
+assigned papers, evidence and global writing rules. A same-ID topic change
+invalidates that chapter; only explicit `depends_on_sections` also invalidate
+their dependants. Optional `depends_on_sections`
 orders chapters that require completed chapter results; cycles, missing or
 failed prerequisites leave the dependent chapter unfinished. Only the
 coordinator publishes progress and checkpoints, and final outputs follow
-outline order. Changing shared responsibilities invalidates affected cached
-inputs. The model gateway's global and per-user limits still apply; both must
-permit at least two requests for model calls to overlap.
+outline order. Retry jobs keep compatible completed chapters and resume only
+failed or changed chapters; an ID-only legacy marker cannot override a
+fingerprint mismatch. The model gateway's global and per-user limits still
+apply; both must permit at least two requests for model calls to overlap.
 
 Progress reports each active chapter as preparing, writing prose or checking
 sources, at the actual call boundary rather than after the audit has finished.

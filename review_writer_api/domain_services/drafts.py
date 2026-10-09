@@ -42,6 +42,7 @@ from review_writer_api.errors import (
     WorkflowValidationError,
 )
 from review_writer_api.security import Permission, Principal
+from review_writer_api.ttl_cache import TTLCache
 from review_writer_api.workflow_repository import ArtifactRecord, WorkflowRepository
 from review_writer_core.draft_bibliography import (
     citation_map_comment,
@@ -53,6 +54,7 @@ from review_writer_core.chemical_typography import normalize_chemical_typography
 from review_writer_core.paragraph_citations import render_paragraph_citations
 from review_writer_core.stages.sections.authoring import paragraph_parts, prose_layout
 from review_writer_core.publication_tables import render_section_comparison
+from review_writer_core.section_reaction_table import render_reaction_table, select_table_style
 from review_writer_core.draft_issue_routing import (
     quality_issue_paper_ids,
     quality_issue_source_evidence_refs,
@@ -74,10 +76,10 @@ from review_writer_core.publication_caption import (
     figure_rights_fields,
 )
 from review_writer_core.publication_voice import publication_voice_issues
+from review_writer_core.narrative_repetition import scan_repetition_hints
+from review_writer_core.manuscript_coherence import assembly_records, current_records
 from review_writer_core.writing_contracts import (
-    DRAFT_PASS_THRESHOLD,
     substantive_quality_findings,
-    PARAGRAPH_PASS_THRESHOLD,
     paragraph_finding_is_blocking,
 )
 from review_writer_core.workflow.artifacts import (
@@ -107,10 +109,13 @@ class DraftsService(
     _text_sha256 = staticmethod(text_sha256)
     _apply_rewrite_overlays = staticmethod(apply_rewrite_overlays)
 
-    def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService):
+    def __init__(self, repository: WorkflowRepository, artifacts: ArtifactService,
+                 *, reaction_quickref_tables: bool = False):
         self.repository = repository
         self.artifacts = artifacts
+        self.reaction_quickref_tables = reaction_quickref_tables
         self._write_lock = threading.RLock()
+        self._repetition_cache = TTLCache(capacity=32, ttl=900)
 
     def _revision(self, principal: Principal, project_id: str) -> int:
         state = self.repository.get_stage_state(principal.user_id, project_id, "draft")
@@ -230,6 +235,7 @@ class DraftsService(
         figure_manifest: dict[str, Any],
         matrix: dict[str, Any],
         evidence_package: dict[str, Any] | None = None,
+        reaction_quickref_tables: bool = False,
     ) -> str:
         evidence_registry = {
             str(row.get("evidence_key") or ""): row
@@ -525,12 +531,29 @@ class DraftsService(
                     text = f"{text[:position].rstrip()} ({'; '.join(figure_callouts)}){text[position:]}"
                 parts.append(f"{text}\n\n<!-- paragraph_id: {paragraph_id} -->")
                 parts.extend(figure_blocks)
-            comparison = render_section_comparison(
-                section, matrix_by_id, citation_numbers, table_number=table_number + 1,
-            )
+            # The condensed reader quick-reference table is selected per section
+            # and only when enabled; it falls back to the legacy comparator when
+            # it cannot produce a viable table, so no chapter loses its table.
+            style = str(section.get("table_style") or "")
+            if not style:
+                style = select_table_style(section) if reaction_quickref_tables else "comparison"
+            comparison = ""
+            if style == "reaction_quickref":
+                comparison = render_reaction_table(
+                    section, citation_numbers, table_number=table_number + 1,
+                )
+            if not comparison:
+                comparison = render_section_comparison(
+                    section, matrix_by_id, citation_numbers, table_number=table_number + 1,
+                )
             if comparison:
                 table_number += 1
-                parts.append(comparison)
+                # The table is its own editable block: the marker makes the
+                # paragraph editor load it, and paragraph_spans already accepts
+                # a marked block. Saving it replaces only this table.
+                parts.append(
+                    f"{comparison}\n\n<!-- paragraph_id: {section.get('section_id')}-T01 -->"
+                )
         if cited_paper_ids:
             parts.append(citation_map_comment(citation_numbers))
             references = ["## References"]
@@ -581,8 +604,10 @@ class DraftsService(
             manifest,
             matrix,
             evidence_package,
+            reaction_quickref_tables=self.reaction_quickref_tables,
         )
         initial_markdown = markdown
+        content_records = assembly_records(self._paragraph_spans(initial_markdown), sections.get("sections") or [])
         markdown, overlay_replay = self._apply_rewrite_overlays(markdown, overlays)
         previous_versions = self.repository.list_artifacts(principal.user_id, project_id, DRAFT_DOCUMENT)
         if previous_versions:
@@ -625,6 +650,7 @@ class DraftsService(
                         overlay_artifact.id if overlay_artifact else ""
                     ),
                     "overlay_replay": overlay_replay,
+                    "content_records": content_records,
                     "synthesis_sources": dict(previous_versions[0].metadata.get("synthesis_sources") or {}) if previous_versions else {},
                     "title_user_modified": bool(previous.metadata.get("title_user_modified")) if previous_versions else False,
                     "keywords_user_omitted": bool(previous.metadata.get("keywords_user_omitted")) if previous_versions else False,
@@ -976,6 +1002,14 @@ class DraftsService(
                 },
             )
         voice_issues = publication_voice_issues(text)
+        sections = dialogue_sections(text, draft_artifact.metadata, draft_artifact.id) if draft_artifact else []
+        repetition_key = (str(principal.user_id), project_id, draft_artifact.id,
+                          hashlib.sha256(text.encode("utf-8")).hexdigest()) if draft_artifact else None
+        repetition = self._repetition_cache.get(repetition_key) if repetition_key else None
+        if repetition is None:
+            repetition = scan_repetition_hints(paragraphs, sections)
+            if repetition_key:
+                self._repetition_cache[repetition_key] = repetition
         return {
             "project_id": project_id,
             "revision": state.revision if state else 0,
@@ -1005,6 +1039,8 @@ class DraftsService(
                 "status": "warning" if voice_issues else "pass",
                 "issues": voice_issues,
             },
+            "narrative_repetition": repetition,
+            "content_records": current_records(paragraphs, draft_artifact.metadata.get("content_records") or {}) if draft_artifact else {},
             "paragraphs": [
                 {key: value for key, value in row.items() if key not in {"start", "end", "marker_end"}}
                 for row in paragraphs
@@ -1016,7 +1052,7 @@ class DraftsService(
                 "result": dialogue_batch_job.result, "progress_current": dialogue_batch_job.progress_current,
                 "progress_total": dialogue_batch_job.progress_total, "error_message": public_model_error(dialogue_batch_job.error_message or "")}
                 if dialogue_batch_job else None),
-            "sections": dialogue_sections(text, draft_artifact.metadata, draft_artifact.id) if draft_artifact else [],
+            "sections": sections,
             "section_task_states": {job.payload["section_id"]: {"id": job.id, "status": job.status}
                 for job in jobs if job.payload.get("section_id") and job.status in {"queued", "running", "cancel_requested"}},
             "paragraph_task_states": paragraph_task_states,
@@ -2614,244 +2650,4 @@ class DraftsService(
             "repair_required_issue_ids": repair_ids,
             "release_integrity_failure": bool(integrity),
             "release_integrity_failures": integrity,
-        }
-
-
-    @staticmethod
-    def _replace_scoped_rows(
-        rows: Any,
-        paragraph_id: str,
-        replacements: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        kept = [
-            dict(item)
-            for item in rows or []
-            if isinstance(item, dict)
-            and str(item.get("paragraph_id") or "") != paragraph_id
-        ]
-        return kept + [dict(item) for item in replacements if isinstance(item, dict)]
-
-    def _incremental_quality(
-        self,
-        current_quality: dict[str, Any],
-        built: dict[str, Any],
-        *,
-        paragraph_id: str,
-        source_quality_artifact_id: str,
-    ) -> dict[str, Any]:
-        paragraph_score = dict(built.get("paragraph_score") or {})
-        if str(paragraph_score.get("paragraph_id") or "") != paragraph_id:
-            raise WorkflowValidationError(
-                "Targeted evaluation returned the wrong paragraph identity."
-            )
-        scores = [
-            dict(item)
-            for item in current_quality.get("paragraph_scores") or []
-            if isinstance(item, dict)
-        ]
-        old = next(
-            (item for item in scores if str(item.get("paragraph_id") or "") == paragraph_id),
-            None,
-        )
-        if old is None:
-            raise WorkflowConflict(
-                "The current full evaluation has no score for this paragraph."
-            )
-        old_paragraph_score = max(0.0, min(float(old.get("score") or 0), 100.0))
-        new_paragraph_score = max(
-            0.0, min(float(paragraph_score.get("score") or 0), 100.0)
-        )
-        paragraph_score["score"] = round(new_paragraph_score, 2)
-        paragraph_scores = self._replace_scoped_rows(
-            scores, paragraph_id, [paragraph_score]
-        )
-        paragraph_count = max(1, len(paragraph_scores))
-        previous_score = max(
-            0.0, min(float(current_quality.get("score") or 0), 100.0)
-        )
-        score_delta = (new_paragraph_score - old_paragraph_score) / paragraph_count
-        updated_score = round(max(0.0, min(previous_score + score_delta, 100.0)), 2)
-        paragraph_goal = float(
-            current_quality.get("paragraph_pass_threshold")
-            or current_quality.get("paragraph_goal")
-            or PARAGRAPH_PASS_THRESHOLD
-        )
-        paragraph_failures = [
-            item
-            for item in paragraph_scores
-            if str(item.get("route") or "") != "pass"
-            or str(item.get("severity") or "") in {"critical", "major"}
-        ]
-        blocking = [
-            item
-            for item in paragraph_scores
-            if float(item.get("score") or 0) < paragraph_goal
-            or str(item.get("severity") or "") in {"critical", "major"}
-            or str(item.get("route") or "") not in {"pass", "final_polish"}
-        ]
-        issues = self._replace_scoped_rows(
-            current_quality.get("issues"), paragraph_id, []
-        )
-        if paragraph_score in paragraph_failures:
-            previous_issue = next(
-                (
-                    dict(item)
-                    for item in current_quality.get("issues") or []
-                    if isinstance(item, dict)
-                    and str(item.get("paragraph_id") or "") == paragraph_id
-                ),
-                {},
-            )
-            issue = {
-                **previous_issue,
-                **paragraph_score,
-                "issue_id": f"incremental-{paragraph_id}-{uuid.uuid4().hex[:8]}",
-                "message": str(
-                    paragraph_score.get("diagnosis") or "Review this paragraph."
-                ),
-            }
-            source_entry = built.get("source_check_entry")
-            source_entry = source_entry if isinstance(source_entry, dict) else {}
-            has_original_passages = any(
-                paper.get("passages")
-                for paper in source_entry.get("papers") or []
-                if isinstance(paper, dict)
-            )
-            source_status = str(
-                paragraph_score.get("source_check_status")
-                or issue.get("source_check_status")
-                or "not_assessed"
-            )
-            evaluator_route = str(
-                paragraph_score.get("route") or issue.get("route") or ""
-            )
-            issue.update(
-                route_draft_issue(
-                    issue,
-                    source_status=source_status,
-                    evaluator_route=evaluator_route,
-                    has_original_passages=has_original_passages,
-                    reference_map_problem=(
-                        str(issue.get("issue_type") or "")
-                        == "citation_reference_mapping"
-                    ),
-                    source_evidence_refs=list(
-                        paragraph_score.get("source_evidence_refs")
-                        or issue.get("source_evidence_refs")
-                        or []
-                    ),
-                    source_ready=has_original_passages,
-                    evidence_texts=[
-                        str(passage.get("text") or "")
-                        for paper in source_entry.get("papers") or []
-                        if isinstance(paper, dict)
-                        for passage in paper.get("passages") or []
-                        if isinstance(passage, dict)
-                        and str(passage.get("text") or "").strip()
-                    ],
-                )
-            )
-            repair_stage = str(issue.get("repair_stage") or "draft")
-            issue["recommended_return_stage"] = self._navigation_stage_for_repair(str(issue.get("execution_stage") or repair_stage))
-            issues.append(issue)
-        source_check = dict(current_quality.get("source_check") or {})
-        source_entry = built.get("source_check_entry")
-        if isinstance(source_entry, dict) and source_entry:
-            source_check["entries"] = self._replace_scoped_rows(
-                source_check.get("entries"), paragraph_id, [source_entry]
-            )
-            counts: dict[str, int] = {}
-            for item in source_check.get("entries") or []:
-                if not isinstance(item, dict):
-                    continue
-                key = str(item.get("source_check_status") or "not_assessed")
-                counts[key] = counts.get(key, 0) + 1
-            source_check["counts"] = dict(sorted(counts.items()))
-        preflight = dict(current_quality.get("preflight") or {})
-        local_preflight = built.get("local_preflight")
-        if isinstance(local_preflight, dict):
-            for key in ("paragraph_checks", "paragraph_findings"):
-                preflight[key] = self._replace_scoped_rows(
-                    preflight.get(key),
-                    paragraph_id,
-                    [
-                        item
-                        for item in local_preflight.get(key) or []
-                        if isinstance(item, dict)
-                    ],
-                )
-        hard_gate_failures = {
-            str(value)
-            for value in current_quality.get("hard_gate_failures") or []
-            if str(value).strip()
-            and str(value) != "paragraph_readability_or_source_failures"
-        }
-        hard_gate_failures.update(
-            str(value)
-            for value in built.get("local_hard_gate_failures") or []
-            if str(value).strip()
-            and str(value) != "paragraph_readability_or_source_failures"
-        )
-        for finding in preflight.get("paragraph_findings") or []:
-            if isinstance(finding, dict):
-                finding["hard_gate"] = paragraph_finding_is_blocking(finding)
-        if any(
-            paragraph_finding_is_blocking(item)
-            for item in preflight.get("paragraph_findings") or []
-            if isinstance(item, dict)
-        ):
-            hard_gate_failures.add("paragraph_readability_or_source_failures")
-        hard_gate_failures = sorted(hard_gate_failures)
-        goal = float(current_quality.get("goal") or current_quality.get("pass_threshold") or DRAFT_PASS_THRESHOLD)
-        decision = (
-            "PASS"
-            if updated_score >= goal and not hard_gate_failures and not blocking
-            else "REGENERATE_SECTIONS"
-        )
-        history = [
-            dict(item)
-            for item in current_quality.get("incremental_evaluations") or []
-            if isinstance(item, dict)
-        ][-99:]
-        history.append(
-            {
-                "paragraph_id": paragraph_id,
-                "old_paragraph_score": round(old_paragraph_score, 2),
-                "new_paragraph_score": round(new_paragraph_score, 2),
-                "previous_overall_score": round(previous_score, 2),
-                "updated_overall_score": updated_score,
-                "paragraph_count": paragraph_count,
-                "overall_score_delta": round(score_delta, 4),
-                "source_quality_artifact_id": source_quality_artifact_id,
-                "evaluated_at": str(built.get("evaluated_at") or utc_now().isoformat()),
-            }
-        )
-        root_causes, repair_tasks = self._quality_root_causes(issues)
-        routing = self._routing_summary_from_issues(issues)
-        return {
-            **current_quality,
-            "score": updated_score,
-            "total_score": updated_score,
-            "decision": decision,
-            "status": "completed",
-            "paragraph_scores": paragraph_scores,
-            "paragraph_failures": paragraph_failures,
-            "blocking_paragraph_failures": blocking,
-            "issues": issues,
-            "routing": routing,
-            "root_causes": root_causes,
-            "repair_tasks": repair_tasks,
-            "repair_summary": self._repair_summary(
-                current_quality, root_causes
-            ),
-            "hard_gate_failures": hard_gate_failures,
-            "source_check": source_check,
-            "preflight": preflight,
-            "quality_scope": "incremental_paragraph",
-            "last_evaluated_paragraph_id": paragraph_id,
-            "last_incremental_dimension_scores": list(
-                built.get("local_dimension_scores") or []
-            ),
-            "incremental_evaluations": history,
-            "evaluated_at": str(built.get("evaluated_at") or utc_now().isoformat()),
         }

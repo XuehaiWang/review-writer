@@ -159,7 +159,7 @@ class NoLegacyRuntimeTests(unittest.TestCase):
             "/api/v1/projects/{project_id}/discovery",
             "/api/v1/projects/{project_id}/planning",
             "/api/v1/projects/{project_id}/sections",
-            "/api/v1/projects/{project_id}/figures",
+            "/api/v1/projects/{project_id}/images",
             "/api/v1/projects/{project_id}/draft",
             "/api/v1/projects/{project_id}/final",
         ):

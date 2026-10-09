@@ -108,15 +108,16 @@ class GatewayRequestError(RuntimeError):
 class DeferredModelCall(BaseException):
     """The durable model job owns this request; the scientific job may yield."""
 
-    def __init__(self, model_job_id: str, *, model_job_ids=None):
+    def __init__(self, model_job_id: str, *, model_job_ids=None, request_key: str = ""):
         super().__init__(model_job_id)
         self.model_job_id = model_job_id
         self.model_job_ids = list(dict.fromkeys([model_job_id, *(model_job_ids or [])]))
+        self.request_key = request_key
 
 
 def _delegated_text_result(
     url: str, token: str, *, request_key: str, stage: str,
-    prompt: str, response_format: str,
+    prompt: str, response_format: str, resume_only: bool = False,
 ) -> str:
     base = url.rsplit("/", 1)[0] + "/model-delegations"
     body = json.dumps({
@@ -128,18 +129,21 @@ def _delegated_text_result(
         "Accept": "application/json",
     })
     with _model_wait_marker():
-        try:
-            with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=30) as response:
-                snapshot = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code not in {408, 500, 502, 503, 504, 524}:
-                raise _gateway_http_error(exc) from exc
-            exc.close()
+        if resume_only:
             snapshot = _recover_delegated_submission(base, token, request_key)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-            # A lost submission response is not permission to create another
-            # paid request. Query the original key; never repeat the POST.
-            snapshot = _recover_delegated_submission(base, token, request_key)
+        else:
+            try:
+                with urllib.request.urlopen(request, context=ssl.create_default_context(), timeout=30) as response:
+                    snapshot = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code not in {408, 500, 502, 503, 504, 524}:
+                    raise _gateway_http_error(exc) from exc
+                exc.close()
+                snapshot = _recover_delegated_submission(base, token, request_key)
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+                # A lost submission response is not permission to create another
+                # paid request. Query the original key; never repeat the POST.
+                snapshot = _recover_delegated_submission(base, token, request_key)
     if not isinstance(snapshot, dict):
         raise RuntimeError("The model delegation returned an invalid response.")
     status = str(snapshot.get("status") or "")
@@ -152,7 +156,7 @@ def _delegated_text_result(
         model_job_id = str(snapshot.get("model_job_id") or "")
         if not model_job_id:
             raise RuntimeError("The model delegation did not identify its durable job.")
-        raise DeferredModelCall(model_job_id)
+        raise DeferredModelCall(model_job_id, request_key=request_key)
     raise RuntimeError(str(snapshot.get("error") or "The delegated model request failed."))
 
 
@@ -267,6 +271,7 @@ def parse_json_object_text(
     *,
     required_list: str = "",
     context: str = "Model",
+    top_level_only: bool = False,
 ) -> dict[str, Any]:
     """Extract one usable JSON object from a structured model response.
 
@@ -299,9 +304,23 @@ def parse_json_object_text(
             try:
                 decoded = [json.loads(repaired)]
             except json.JSONDecodeError:
-                decoded = _decoded_json_values(source)
-                if repaired != source:
-                    decoded.extend(_decoded_json_values(repaired))
+                if top_level_only:
+                    # A truncated plan may contain valid nested paper-role objects.
+                    # Decode only the first root object, allowing harmless prose
+                    # around a complete answer without promoting inner fragments.
+                    decoded = []
+                    root_start = repaired.find("{")
+                    if root_start >= 0:
+                        try:
+                            value, _end = json.JSONDecoder().raw_decode(repaired, root_start)
+                        except json.JSONDecodeError:
+                            pass
+                        else:
+                            decoded = [value]
+                else:
+                    decoded = _decoded_json_values(source)
+                    if repaired != source:
+                        decoded.extend(_decoded_json_values(repaired))
         for value in decoded:
             if not isinstance(value, dict):
                 continue
@@ -318,6 +337,8 @@ def parse_json_object_text(
             f"{context} returned JSON object(s), but none contains the required "
             f"`{required_list}` list."
         )
+    if top_level_only:
+        raise RuntimeError(f"{context} returned an incomplete or invalid top-level JSON object.")
     raise RuntimeError(f"{context} returned no complete JSON object.")
 
 
@@ -371,6 +392,13 @@ def image_gateway_configured() -> bool:
     )
 
 
+def text_request_key(prompt: str, *, label: str, response_format: str = "text") -> str:
+    digest = hashlib.sha256(
+        f"{str(response_format).strip().casefold()}\0{prompt}".encode("utf-8")
+    ).hexdigest()
+    return f"{str(label)[:32]}-{digest[:48]}"
+
+
 def call_model(
     prompt: str,
     *,
@@ -380,16 +408,21 @@ def call_model(
     recover_on_timeout: bool = True,
     gateway_url: str = "",
     task_token: str = "",
+    resume_request_key: str = "",
 ) -> str:
     url = str(gateway_url or os.environ.get("REVIEW_WRITER_MODEL_GATEWAY_URL") or "").strip()
     token = str(task_token or os.environ.get("REVIEW_WRITER_TASK_TOKEN") or "").strip()
     if not url or not token:
         raise RuntimeError("The internal model gateway configuration is incomplete.")
     normalized_format = str(response_format).strip().casefold()
-    digest = hashlib.sha256(
-        f"{normalized_format}\0{prompt}".encode("utf-8")
-    ).hexdigest()
-    request_key = f"{str(label)[:32]}-{digest[:48]}"
+    request_key = text_request_key(prompt, label=label, response_format=normalized_format)
+    if resume_request_key:
+        # Never turn an explicit recovery into a new paid submission, even if
+        # delegation was disabled between worker turns.
+        return _delegated_text_result(
+            url, token, request_key=resume_request_key, stage=str(label)[:96],
+            prompt=prompt, response_format=normalized_format, resume_only=True,
+        )
     if os.environ.get("REVIEW_WRITER_DELEGATE_MODEL_CALLS") == "1" and not gateway_url:
         return _delegated_text_result(
             url, token, request_key=request_key, stage=str(label)[:96],
@@ -451,6 +484,12 @@ def call_model(
     return text
 
 
+def structured_json_prompt(prompt: str, schema: dict[str, Any]) -> str:
+    """Shared schema envelope for hosted section writing and its diagnostics."""
+    return (f"{prompt}\n\nReturn only one JSON object matching this JSON Schema exactly:\n"
+            f"{json.dumps(schema, ensure_ascii=False)}")
+
+
 def call_json_model(
     prompt: str,
     *,
@@ -458,6 +497,8 @@ def call_json_model(
     timeout_seconds: int = 330,
     required_list: str = "",
     recover_on_timeout: bool = True,
+    top_level_only: bool = False,
+    resume_request_key: str = "",
 ) -> dict[str, Any]:
     raw = call_model(
         prompt,
@@ -465,11 +506,13 @@ def call_json_model(
         response_format="json",
         timeout_seconds=timeout_seconds,
         **({"recover_on_timeout": False} if not recover_on_timeout else {}),
+        **({"resume_request_key": resume_request_key} if resume_request_key else {}),
     ).strip()
     return parse_json_object_text(
         raw,
         required_list=required_list,
         context="The internal model gateway",
+        top_level_only=top_level_only,
     )
 
 

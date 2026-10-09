@@ -141,14 +141,18 @@ Stop after this stage for human outline selection. The preferred human artifact 
 selected_outline.md
 ```
 
-The dashboard may create this artifact from a built-in structure, a reference
-review, or a custom outline. A newly selected custom outline starts completely
-blank and is not ready for Blueprint until the reviewer writes and saves it.
-Reference-review uploads must run through `review-reference-outline-template`:
-learn only hierarchy, section-role sequence, pacing, and writing conventions,
-then generate all heading wording and scientific meaning from the current topic
-and Matrix. Legacy direct-heading-extraction candidates are unsafe and must not
-be offered for selection.
+The dashboard may create this artifact from a built-in structure, an imported
+reference outline, or a custom outline. A newly selected custom outline starts
+completely blank and is not ready for Blueprint until the reviewer writes and
+saves it.
+Uploading a reference review document imports the section headings that document
+already has, keeping their levels: DOCX through Word heading styles, Markdown and
+text through their own headings, and PDF through MinerU's Markdown so the
+nesting is real rather than guessed. Front matter and back matter (abstract,
+keywords, references, appendices) are not imported, the first section is always
+an Introduction, and the result only fills the editor — the reviewer reviews and
+saves it as their own outline. The import never writes the Matrix and never
+replaces a saved outline on its own.
 The dashboard's default editor is a visual section-card builder. Reviewers can
 edit section titles and purposes, assign papers with checkboxes, request a
 paper recommendation, and reorder sections without knowing the Markdown

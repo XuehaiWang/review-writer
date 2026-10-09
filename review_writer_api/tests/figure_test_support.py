@@ -4,7 +4,6 @@ import base64
 import json
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 
@@ -18,12 +17,13 @@ from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper
 from review_writer_api.security import Principal, Role
+from review_writer_api.tests._test_support import JobPollingMixin
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 
 
-class NativeFigureApiTestCase(unittest.TestCase):
+class NativeFigureApiTestCase(JobPollingMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -157,6 +157,9 @@ class NativeFigureApiTestCase(unittest.TestCase):
             public_origin="http://testserver",
             credential_encryption_key=TEST_KEY,
             hosted_workspace_root=self.root / "users",
+            # Opt-in only: subclasses with offline text handlers still pass
+            # normal model-catalog admission without any real provider call.
+            text_provider_api_key=getattr(self, "offline_text_provider_key", ""),
         )
         self.app = create_app(
             settings,
@@ -454,20 +457,6 @@ class NativeFigureApiTestCase(unittest.TestCase):
             status="approved",
             invalidate_stages=("figures", "draft", "final"),
         )
-
-    def wait_job(self, client: TestClient, job_id: str) -> dict:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            payload = client.get(f"/api/v1/jobs/{job_id}").json()
-            if payload["status"] in {
-                "succeeded",
-                "failed",
-                "cancelled",
-                "interrupted",
-            }:
-                return payload
-            time.sleep(0.02)
-        self.fail("Figure job did not finish.")
 
     def start_redraw(self, client: TestClient, key: str = "redraw") -> dict:
         response = client.post(

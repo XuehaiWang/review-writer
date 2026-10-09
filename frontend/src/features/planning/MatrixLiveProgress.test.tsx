@@ -47,7 +47,7 @@ describe("readMatrixEnrichmentLive", () => {
     expect(live?.active_paper_ids).toEqual(["P001", "P002"]);
     expect(live?.items).toEqual([]);
     render(<MatrixLiveProgress job={running} papers={[{ paper_id: "P001" }, { paper_id: "P002" }]} />);
-    expect(screen.getByText(/正在并行提取与核验 2 篇论文|Extracting and verifying 2 papers in parallel/)).toBeInTheDocument();
+    expect(screen.getByText(/正在并行分析 2 篇论文|Analyzing 2 papers in parallel/)).toBeInTheDocument();
     expect(screen.getByText("0/2")).toBeInTheDocument();
   });
 
@@ -136,5 +136,19 @@ describe("readMatrixEnrichmentLive", () => {
     expect(screen.getByText(/Current paper/)).toBeInTheDocument();
     expect(screen.getByText("Cycloaddition")).toBeInTheDocument();
     expect(screen.getByText("1/2")).toBeInTheDocument();
+  });
+
+  it("shows read status for unused candidates but retains explicit verification and error states", () => {
+    render(<MatrixLiveProgress job={job({ matrix_enrichment_live: {
+      phase: "extracting", current: 3, total: 4, items: [
+        { paper_id: "read", status: "partial", processing: { reading: "completed", verification: "pending" }, pending_fact_count: 2 },
+        { paper_id: "revision", status: "partial", processing: { reading: "completed", verification: "pending" }, pending_fact_count: 1, pending_revision_fact_ids: ["revision-fact"] },
+        { paper_id: "failed", status: "failed", processing: { reading: "completed", verification: "pending" }, pending_fact_count: 1 },
+      ],
+    } })} papers={[]} />);
+    expect(screen.getByText("已阅读")).toBeInTheDocument();
+    expect(screen.getByText("2 条初读发现尚未核验，将在实际使用时核对原文。")).toBeInTheDocument();
+    expect(screen.getByText("待核验")).toBeInTheDocument();
+    expect(screen.getByText("处理失败")).toBeInTheDocument();
   });
 });

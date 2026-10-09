@@ -134,7 +134,7 @@ function rowsOf(payload?: RedrawPayload) {
 }
 
 function loadRedraw(projectId: string) {
-  return apiRequest<RedrawPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/figures`);
+  return apiRequest<RedrawPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/images`);
 }
 
 function rowImage(row?: RedrawRow) {
@@ -166,7 +166,7 @@ function FigureReview({ projectId, onOpenRedraw, opening, openError }: { project
   const [note, setNote] = useState("");
   const [representativeRole, setRepresentativeRole] = useState("unknown");
   const [selectionComplete, setSelectionComplete] = useState(false);
-  const review = useQuery({ queryKey: ["figure-review", projectId], queryFn: () => apiRequest<ReviewPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/review`) });
+  const review = useQuery({ queryKey: ["figure-review", projectId], queryFn: () => apiRequest<ReviewPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/images/review`) });
   const papers = review.error ? [] : review.data?.papers || [];
   const selected = papers.find((paper) => paper.paper_id === selectedPaperId) || papers[0];
   useEffect(() => {
@@ -176,7 +176,7 @@ function FigureReview({ projectId, onOpenRedraw, opening, openError }: { project
   useEffect(() => setRepresentativeRole(selected?.human_review?.representative_role || "unknown"), [selected]);
   useEffect(() => setSelectionComplete(review.data?.status === "approved"), [review.data?.status]);
   const save = useMutation({
-    mutationFn: (candidateIndex: number) => apiRequest<ReviewSelectionResult>(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/review/${encodeURIComponent(selected!.paper_id)}`, { method: "PUT", ...jsonBody({ revision: review.data!.revision, candidate_index: candidateIndex, review_note: note.trim(), representative_role: representativeRole }) }),
+    mutationFn: (candidateIndex: number) => apiRequest<ReviewSelectionResult>(`/api/v1/projects/${encodeURIComponent(projectId)}/images/review/${encodeURIComponent(selected!.paper_id)}`, { method: "PUT", ...jsonBody({ revision: review.data!.revision, candidate_index: candidateIndex, review_note: note.trim(), representative_role: representativeRole }) }),
     onSuccess: async (result) => {
       setSelectionComplete(result.selection_complete);
       queryClient.removeQueries({ queryKey: ["figures", projectId], exact: true });
@@ -236,8 +236,8 @@ function FigureRedraw({ projectId, onBack }: { projectId: string; onBack: () => 
       }
       const single = figureIds.length === 1;
       const endpoint = single
-        ? `/api/v1/projects/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(figureIds[0])}/jobs`
-        : `/api/v1/projects/${encodeURIComponent(projectId)}/figures/jobs`;
+        ? `/api/v1/projects/${encodeURIComponent(projectId)}/images/${encodeURIComponent(figureIds[0])}/jobs`
+        : `/api/v1/projects/${encodeURIComponent(projectId)}/images/jobs`;
       const body = single
         ? { figure_type: type, ...(retryJobId ? { retry_of_job_id: retryJobId } : {}) }
         : { figure_ids: figureIds, figure_type: type };
@@ -246,23 +246,23 @@ function FigureRedraw({ projectId, onBack }: { projectId: string; onBack: () => 
     onSuccess: refresh,
   });
   const cancel = useMutation({ mutationFn: () => apiRequest(`/api/v1/jobs/${encodeURIComponent(payload!.batch_redraw.job_id)}/cancel`, { method: "POST" }), onSuccess: refresh });
-  const approveOne = useMutation({ mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(selected!.figure_id!)}/approve`, { method: "POST" }), onSuccess: refresh });
-  const approveAll = useMutation({ mutationFn: () => apiRequest<{ approved_count: number; already_approved_count: number; skipped_count: number }>(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/approve-successful`, { method: "POST" }), onSuccess: refresh });
+  const approveOne = useMutation({ mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/images/${encodeURIComponent(selected!.figure_id!)}/approve`, { method: "POST" }), onSuccess: refresh });
+  const approveAll = useMutation({ mutationFn: () => apiRequest<{ approved_count: number; already_approved_count: number; skipped_count: number }>(`/api/v1/projects/${encodeURIComponent(projectId)}/images/approve-successful`, { method: "POST" }), onSuccess: refresh });
   const preserveSources = useMutation({
     mutationFn: () => apiRequest<{ preserved_count: number; already_preserved_count: number; retained_generated_count: number; selected_count: number }>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/figures/preserve-sources`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/images/preserve-sources`,
       { method: "POST" },
     ),
     onSuccess: refresh,
   });
   const setInclusion = useMutation({
     mutationFn: ({ figureId, included }: { figureId: string; included: boolean }) => apiRequest(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/figures/${encodeURIComponent(figureId)}/${included ? "include" : "exclude"}`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/images/${encodeURIComponent(figureId)}/${included ? "include" : "exclude"}`,
       { method: "POST" },
     ),
     onSuccess: refresh,
   });
-  const confirm = useMutation({ mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/confirm`, { method: "POST", ...jsonBody({ revision: payload!.revision }) }), onSuccess: () => navigate(`/draft?project=${encodeURIComponent(projectId)}`) });
+  const confirm = useMutation({ mutationFn: () => apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/images/confirm`, { method: "POST", ...jsonBody({ revision: payload!.revision }) }), onSuccess: () => navigate(`/draft?project=${encodeURIComponent(projectId)}`) });
   const active = Boolean(payload && (jobIsActive(payload.batch_redraw.status) || Object.values(payload.figure_redraw_states).some((item) => ["queued", "running", "retrying", "cancel_requested"].includes(String(item.status || "")))));
   const paperLabels = payload?.paper_display_labels || {};
   const source = sourceUrl(selected);
@@ -354,9 +354,9 @@ export function ImagesPage() {
       const projectId = project.project_id;
       const review = await queryClient.fetchQuery({
         queryKey: ["figure-review", projectId],
-        queryFn: () => apiRequest<ReviewPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/review`),
+        queryFn: () => apiRequest<ReviewPayload>(`/api/v1/projects/${encodeURIComponent(projectId)}/images/review`),
       });
-      return apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/figures/review/sync`, {
+      return apiRequest(`/api/v1/projects/${encodeURIComponent(projectId)}/images/review/sync`, {
         method: "POST",
         ...jsonBody({ revision: review.revision }),
       });

@@ -135,14 +135,18 @@ class DraftDialogueMixin(SectionVersionsMixin):
                 if previous.payload.get("initial_artifact_id") != initial_artifact_id:
                     raise WorkflowConflict("This discussion branch belongs to another initial version.")
         memory = self.section_conversation_memory(principal, project_id, section, history, branch_id=branch_id)
+        from review_writer_core.chapter_dialogue_context import chapter_outline
+        previous_discussion = next((turn for turn in reversed(history)
+            if turn.get("branch_id", "") == branch_id and turn.get("action") == "discuss" and turn.get("status") == "succeeded"
+            and (turn.get("result") or {}).get("routing")), {})
         return {"project_id": project_id, "revision_mode": "dialogue_batch", "section_id": section_id,
             "section_input": request, "message": message, "action": action,
             "branch_id": branch_id, "initial_artifact_id": initial_artifact_id,
+            "discussion_related": ((previous_discussion.get("result") or {}).get("routing") or {}).get("related", []),
             "paragraphs": paragraphs,
             "section_context": {"title": section["title"],
                 "paragraphs": [{"paragraph_id": p["paragraph_id"], "text": p["text"]} for p in (initial or section)["paragraphs"]],
-                "outline": [{"section_id": s["section_id"], "title": s["title"],
-                    "saved_opening_excerpt": s["paragraphs"][0]["text"][:500]} for s in sections],
+                "outline": chapter_outline(sections, section_id),
                 "conversation_memory": memory}}, None
 
     def dialogue_paragraph(self, principal, project_id, key):

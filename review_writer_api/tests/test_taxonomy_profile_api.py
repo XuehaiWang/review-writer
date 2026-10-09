@@ -7,35 +7,18 @@ import uuid
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import select
 
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.security import Principal, Role
+from review_writer_api.tests._test_support import session_factory
 from review_writer_api.workflow_models import WorkflowStageState
 
 
 TEST_CREDENTIAL_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 
-
-def session_factory():
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(engine, "connect")
-    def enable_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False), engine
 
 
 class TaxonomyProfileApiTests(unittest.TestCase):
@@ -60,6 +43,9 @@ class TaxonomyProfileApiTests(unittest.TestCase):
             database_url="sqlite+pysqlite:///:memory:",
             public_origin="http://testserver",
             credential_encryption_key=TEST_CREDENTIAL_KEY,
+            # This suite tests configured-user taxonomy changes, not missing
+            # provider onboarding. No model requests are made by these tests.
+            text_provider_api_key="test-placeholder-not-a-real-key",
             hosted_workspace_root=root / "hosted",
         )
         self.app = create_app(
@@ -97,7 +83,6 @@ class TaxonomyProfileApiTests(unittest.TestCase):
                 )
                 stored[stage_id] = {"status": status, "revision": index}
             project.stage_states = stored
-            project.current_stage = next(iter(states), "discovery")
 
     def test_catalog_and_new_project_default_to_general_chemistry(self) -> None:
         with TestClient(self.app) as client:
@@ -106,14 +91,17 @@ class TaxonomyProfileApiTests(unittest.TestCase):
             payload = catalog.json()
             self.assertEqual("chemistry_general", payload["default_profile"])
             profiles = {item["id"]: item for item in payload["items"]}
-            self.assertEqual({"general_academic", "chemistry_general"}, set(profiles))
-            self.assertFalse(profiles["general_academic"]["domain_rules_enabled"])
+            # ``general_academic`` is retired from the offered catalog while the
+            # taxonomy is reworked; it stays a valid profile for existing projects.
+            self.assertEqual({"chemistry_general"}, set(profiles))
             self.assertTrue(profiles["chemistry_general"]["domain_rules_enabled"])
 
             project = self._create_project(client, "general-default")
+            self.assertEqual("library", project["current_stage"])
+            self.assertEqual([], project["completed_stages"])
             self.assertEqual("chemistry_general", project["taxonomy_profile"])
             academic = self._create_project(client, "academic-explicit", taxonomy_profile="general_academic")
-            self.assertEqual("general_academic", academic["taxonomy_profile"])
+            self.assertEqual("general_academic", academic["taxonomy_profile"], academic)
 
             internal_profile = client.post(
                 "/api/v1/projects",

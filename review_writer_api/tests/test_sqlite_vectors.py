@@ -10,15 +10,15 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, select, update, delete, text
+from sqlalchemy import create_engine, select, update, delete
 from sqlalchemy.orm import sessionmaker
 from review_writer_api.database import Base, User, database_session, utc_now
 from review_writer_api.errors import WorkflowValidationError
 from review_writer_api.persistent_storage import LocalPersistentStorage
-from review_writer_api.sqlite_vectors import SQLiteVectors, VectorRow, vector_blob
+from review_writer_api.sqlite_vectors import VectorRow, vector_blob
 from review_writer_api.vector_store import LocalVectorStore
 from review_writer_api.workflow_models import (LibraryPaper, LibraryDocumentIndex, LibraryDocumentChunk,
-    LibraryVectorStore, LibraryVectorVersion, LibraryVectorReadLease)
+    LibraryVectorStore, LibraryVectorVersion)
 from review_writer_api.workspaces import HostedWorkspaceManager
 
 EXTENSION = os.environ.get("REVIEW_WRITER_SQLITE_VECTOR_EXTENSION", "")
@@ -116,7 +116,7 @@ class SQLitePublicationTests(unittest.TestCase):
         self.assertEqual([uuid.UUID(self.rows[4].chunk_row_id)], [r[0] for r in result])
 
     def test_update_preserves_other_papers_and_old_snapshot(self):
-        first = self.publish()
+        self.publish()
         with self.store.borrow(str(self.user),"m",2) as old:
             before = old.read_bytes()
             self.publish([replace(self.rows[0], values=[0,1])], replace_indexes=(self.rows[0].index_id,))

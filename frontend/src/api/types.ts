@@ -24,6 +24,8 @@ export type Project = {
   discovery_status: string;
   current_stage: string;
   completed_stages: string[];
+  /** ready | not_ready | unknown (artifact unreadable) | unchecked */
+  outline_state?: string;
 };
 
 export type ProjectList = {
@@ -296,6 +298,11 @@ export type BibliographyAudit = {
   resolved_by?: string;
   resolved_at?: string | null;
   unresolved_conflicts?: Array<Record<string, unknown>>;
+  manual_review_conflicts?: Array<{
+    field?: string;
+    suggested?: { source?: string; value?: unknown; confidence?: number };
+    candidates?: Array<Record<string, unknown>>;
+  }>;
   automatic_resolution_missing_fields?: string[];
   bibliography_role?: string;
   direct_claim_eligible?: boolean;
@@ -328,6 +335,11 @@ export type BibliographyResolutionResponse = {
 export type LibraryList = {
   items: LibraryPaper[];
   count: number;
+  /** Papers matching the current query, across every page. */
+  total?: number;
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
   query: string;
   requested_mode?: "metadata" | "fulltext" | "hybrid";
   retrieval_mode?: "metadata" | "lexical" | "lexical_only" | "hybrid";

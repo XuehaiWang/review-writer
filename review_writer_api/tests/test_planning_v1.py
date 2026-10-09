@@ -45,6 +45,150 @@ TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("="
 
 
 class PlanningV1Tests(unittest.TestCase):
+    def test_recovered_abstract_is_published_only_from_frozen_opening_sources(self):
+        from copy import deepcopy
+        service = self.app.state.planning_service
+        source = service.matrix_enrichment_payload(self.first, self.project_id, selected_paper_ids=['P001'])
+        paper = source['papers'][0]
+        candidate = paper['evidence_candidates'][0]
+        candidate['opening_candidate'] = True
+        candidate['content'] = 'We report a source-supported synthesis and establish its measured scope under defined experimental conditions.'
+        matrix, artifact = service._matrix(self.first, self.project_id)
+        matrix = deepcopy(matrix)
+        target = next(row for row in matrix['rows'] if row['paper_id'] == paper['paper_id'])
+        target['abstract'] = ''
+        recovery = {'decision': 'abstract', 'spans': [{'evidence_key': candidate['evidence_key'], 'quote': candidate['content']}]}
+        built = {'papers': [{'paper_id': paper['paper_id'], 'facts': [], 'status': 'complete',
+                            'abstract_recovery': recovery}]}
+        with patch.object(service, '_matrix', return_value=(matrix, artifact)):
+            result = service.publish_matrix_enrichment(self.first, self.project_id, source, built, candidate_only=True)
+            saved = next(row for row in result['matrix_snapshot']['rows'] if row['paper_id'] == paper['paper_id'])
+            self.assertEqual(candidate['content'], saved['abstract'])
+            self.assertEqual('model_identified_opening_abstract', saved['abstract_recovery']['source'])
+            recovery['spans'][0]['quote'] = candidate['content'] + ' Invented conclusion.'
+            result = service.publish_matrix_enrichment(self.first, self.project_id, source, built, candidate_only=True)
+            saved = next(row for row in result['matrix_snapshot']['rows'] if row['paper_id'] == paper['paper_id'])
+            self.assertFalse(saved['abstract'])
+        self.assertEqual('', target['abstract'])  # Candidate assembly did not mutate its frozen input.
+
+    def test_review_reading_source_key_ignores_topic_model_but_not_source_changes(self):
+        from copy import deepcopy
+        from review_writer_core.review_fact_readiness import REVIEW_READING_STRATEGY
+        from review_writer_core.scientific_facts import FACT_VALIDATION_VERSION
+        service = self.app.state.planning_service
+        source = service.matrix_enrichment_payload(self.first, self.project_id)
+        self.assertEqual(REVIEW_READING_STRATEGY, source["reading_strategy"])
+        matrix, _ = service._matrix(self.first, self.project_id)
+        snapshot = deepcopy(matrix)
+        by_id = {p["paper_id"]: p for p in source["papers"]}
+        for row in snapshot["rows"]:
+            paper = by_id[row["paper_id"]]
+            row["scientific_facts"] = [{"fact_id": "pending-" + row["paper_id"],
+                "validation_contract": FACT_VALIDATION_VERSION, "verification": {"status": "pending"}}]
+            row["fact_enrichment"] = {"status": "complete", "source_fingerprint": paper["source_fingerprint"],
+                "last_attempt": {"status": "failed"},
+                "fact_extraction_profile": {"reading_strategy": REVIEW_READING_STRATEGY,
+                    "reading_source_key": paper["reading_source_key"], "reading_status": "completed"}}
+        snapshot["review_topic"] = "A different review question"
+        with self.sessions.begin() as session:
+            session.get(Project, uuid.UUID(self.project_id)).model_tier = "luna"
+        current = service.matrix_enrichment_payload(self.first, self.project_id, matrix_snapshot=snapshot)
+        self.assertEqual(0, current["pending_paper_count"])
+        selected = [snapshot["rows"][0]["paper_id"]]
+        scoped = service.matrix_enrichment_payload(self.first, self.project_id,
+            matrix_snapshot=snapshot, selected_paper_ids=selected)
+        self.assertEqual(REVIEW_READING_STRATEGY, scoped["reading_strategy"])
+        self.assertEqual(0, scoped["pending_paper_count"])
+        refreshed = service.matrix_enrichment_payload(self.first, self.project_id,
+            matrix_snapshot=snapshot, selected_paper_ids=selected, force=True)
+        self.assertEqual(selected, [paper["paper_id"] for paper in refreshed["papers"]])
+        self.assertEqual(REVIEW_READING_STRATEGY, refreshed["papers"][0]["reading_strategy"])
+        self.assertEqual(by_id[selected[0]]["reading_source_key"], refreshed["papers"][0]["reading_source_key"])
+        strict = service.matrix_enrichment_payload(self.first, self.project_id,
+            matrix_snapshot=snapshot, selected_paper_ids=selected, reading_strategy=None)
+        self.assertEqual(1, strict["pending_paper_count"])
+        self.assertNotIn("reading_strategy", strict)
+        self.assertNotIn("reading_strategy", strict["papers"][0])
+        with self.sessions.begin() as session:
+            paper = session.scalar(select(LibraryPaper).where(
+                LibraryPaper.user_id == uuid.UUID(self.first.user_id), LibraryPaper.paper_id == selected[0]))
+            paper.content_sha256 = "f" * 64
+        changed = service.matrix_enrichment_payload(self.first, self.project_id, matrix_snapshot=snapshot)
+        self.assertEqual(selected, [p["paper_id"] for p in changed["papers"]])
+        self.assertNotEqual(by_id[selected[0]]["reading_source_key"], changed["papers"][0]["reading_source_key"])
+        with self.assertRaisesRegex(WorkflowConflict, "source content or parser"):
+            service._validate_fact_sources(self.first, source["papers"])
+
+    def test_review_reading_publication_retains_navigation_without_promoting_candidates(self):
+        from review_writer_core.review_fact_readiness import REVIEW_READING_STRATEGY, paper_reading_current
+        from review_writer_core.scientific_facts import fact_is_usable
+        service = self.app.state.planning_service
+        source = service.matrix_enrichment_payload(self.first, self.project_id)
+        built = []
+        for index, paper in enumerate(source["papers"]):
+            candidate = paper["evidence_candidates"][0]
+            quote = candidate["content"]
+            refs = [{key: candidate.get(key) for key in ("evidence_key", "chunk_id", "paper_id", "source_lineage_hash")}
+                    | {"support_excerpt": quote}]
+            built.append({"paper_id": paper["paper_id"], "status": "complete",
+                "fact_extraction_profile": {"reading_strategy": REVIEW_READING_STRATEGY,
+                    "reading_source_key": paper["reading_source_key"], "reading_status": "completed"},
+                "paper_analysis": {"contribution": "A source-located contribution, not an audited claim.",
+                                   "evidence_keys": [candidate["evidence_key"]]},
+                "facts": [{"fact_id": "pending-example", "field_id": "object_input", "value": quote,
+                    "support_level": "direct", "assertion_ceiling": "direct_source_report",
+                    "evidence_ceiling": "Only this source", "evidence_refs": refs,
+                    "verification": {"status": "supported"}}] if index == 0 else []})
+        result = service.publish_matrix_enrichment(self.first, self.project_id, source,
+                                                   {"papers": built}, candidate_only=True)
+        rows = result["matrix_snapshot"]["rows"]
+        self.assertEqual("pending", rows[0]["scientific_facts"][0]["verification"]["status"])
+        # Navigation facts remain usable as background guidance, never as a
+        # directly citable detail (verification stays at claim level).
+        self.assertTrue(fact_is_usable(rows[0]["scientific_facts"][0]))
+        self.assertFalse(fact_is_usable(rows[0]["scientific_facts"][0], purpose="detail"))
+        self.assertEqual({}, rows[0]["evidence_backed_tags"])
+        self.assertEqual("pending", rows[0]["fact_enrichment"]["processing"]["verification"])
+        for row in rows:
+            self.assertTrue(paper_reading_current(row["scientific_facts"], row["fact_enrichment"]))
+            self.assertEqual("navigation_only", row["paper_analysis"]["usage"])
+            self.assertTrue(row["paper_analysis"]["evidence_refs"])
+            self.assertEqual(source["review_topic"], row["paper_analysis"]["review_topic"])
+            self.assertNotIn("planning_source_passages", row)
+        unchanged, _ = service._matrix(self.first, self.project_id)
+        self.assertFalse(any(row.get("paper_analysis") for row in unchanged["rows"]))
+        for paper in built:
+            paper["facts"] = []
+            paper["paper_analysis"]["evidence_keys"] = ["unregistered-source"]
+        rejected = service.publish_matrix_enrichment(self.first, self.project_id, source,
+            {"papers": built}, candidate_only=True)["matrix_snapshot"]["rows"]
+        self.assertTrue(all(not row["paper_analysis"] for row in rejected))
+        self.assertTrue(all(not paper_reading_current(row["scientific_facts"], row["fact_enrichment"])
+                            for row in rejected))
+
+    def test_review_reading_supplement_keeps_source_current_verified_facts_and_revisions(self):
+        from copy import deepcopy
+        from review_writer_core.scientific_facts import fact_is_usable
+        from review_writer_core.stages.planning.fact_revision import revise_fact
+        service = self.app.state.planning_service
+        seed_verified_matrix(service, self.first, self.project_id)
+        matrix, artifact = service._matrix(self.first, self.project_id)
+        snapshot = deepcopy(matrix)
+        old = snapshot["rows"][0]["scientific_facts"][0]
+        revised = revise_fact(old, {"value": old["value"] + " (user refinement)"})
+        snapshot["rows"][0]["scientific_facts"].append(revised)
+        # Explicit fact_revision is a separate strict path; exercise publication
+        # against a concurrent initial-reading result, which cannot delete it.
+        source = service.matrix_enrichment_payload(self.first, self.project_id, force=True)
+        with patch.object(service, "validate_matrix_enrichment_inputs", return_value=(snapshot, artifact)):
+            result = service.publish_matrix_enrichment(self.first, self.project_id, source,
+                {"papers": [{"paper_id": p["paper_id"], "status": "failed", "facts": [],
+                             "error": "offline failure"} for p in source["papers"]]}, candidate_only=True)
+        facts = result["matrix_snapshot"]["rows"][0]["scientific_facts"]
+        self.assertEqual(old, next(f for f in facts if f["fact_id"] == old["fact_id"]))
+        self.assertTrue(fact_is_usable(facts[0]))
+        self.assertEqual(revised, next(f for f in facts if f["fact_id"] == revised["fact_id"]))
+
     def test_missing_topic_recommendation_is_a_persisted_candidate_not_an_outline_write(self):
         from review_writer_core.stages.planning.topic_recommendation import validate_recommendation
         calls = []
@@ -85,6 +229,58 @@ class PlanningV1Tests(unittest.TestCase):
             self.assertIn("Approaches and evidence", client.get(base).json()["selected_outline_md"])
             self.current = self.second
             self.assertEqual(404, client.post(base + "/outline/topic/jobs", headers=self.headers()).status_code)
+
+    def test_planning_list_omits_fact_records_and_serves_them_per_paper(self) -> None:
+        from review_writer_core.scientific_facts import fact_display_signals
+
+        base = f"/api/v1/projects/{self.project_id}/planning"
+        with TestClient(self.app) as client:
+            seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)
+            payload = self.planning(client)
+            row = payload["literature_matrix"]["rows"][0]
+            # One paper's records and comparison evidence can exceed 150 KB, so a
+            # paper list of hundreds of rows must not carry them.
+            self.assertNotIn("scientific_facts", row)
+            self.assertNotIn("comparison_evidence", row)
+            self.assertNotIn("paper_analysis", row)
+            self.assertIn("facts_digest", row)
+            missing = client.get(f"{base}/matrix/P-NOT-IN-MATRIX", headers=self.headers())
+            self.assertEqual(404, missing.status_code)
+            detail = client.get(f"{base}/matrix/{row['paper_id']}", headers=self.headers())
+        self.assertEqual(200, detail.status_code, detail.text)
+        full = detail.json()["paper"]
+        self.assertEqual(row["paper_id"], full["paper_id"])
+        # The detail row is the complete one the paper view renders.
+        self.assertTrue(full["scientific_facts"])
+        self.assertEqual(row["display_label"], full["display_label"])
+        self.assertEqual(
+            row["facts_digest"],
+            fact_display_signals(
+                full["scientific_facts"],
+                pending_revision_fact_ids=(full.get("fact_enrichment") or {}).get(
+                    "pending_revision_fact_ids"
+                ),
+            ),
+        )
+
+    def test_planning_read_skips_style_candidate_previews(self) -> None:
+        base = f"/api/v1/projects/{self.project_id}/planning"
+        with TestClient(self.app) as client:
+            client.put(base + "/outline", headers=self.headers(), json={
+                "revision": self.planning(client)["matrix_revision"],
+                "outline_style": "custom",
+                "outline_md": "## Introduction\nPurpose: Frame the review.\n",
+            })
+            payload = self.planning(client)
+        sources = [candidate["source"] for candidate in payload["outline_candidates"]]
+        # Building one preview per built-in style needs the whole per-paper
+        # evidence text, and no view reads them: the outline chooser renders its
+        # cards from a client-side catalog and the server rebuilds the document
+        # when a style is chosen. A read must not pay for them again.
+        self.assertNotIn("builtin", sources)
+        # The candidates a caller can actually apply must stay available.
+        self.assertTrue(payload["outline_candidates"])
+        self.assertIn("saved", sources)
 
     def test_candidate_source_failure_is_local_and_retains_valid_previous_fact(self):
         from copy import deepcopy
@@ -770,6 +966,79 @@ class PlanningV1Tests(unittest.TestCase):
         self.assertEqual([], paper["required_fact_roles"])
         self.assertEqual(FACT_PROMPT_VERSION, MATRIX_FACT_PROMPT_VERSION)
 
+    def test_matrix_fact_input_includes_bounded_own_body_candidates(self) -> None:
+        class BodyIndex:
+            enabled = True
+
+            @staticmethod
+            def summaries(_principal, paper_ids):
+                return {
+                    paper_id: {
+                        "fulltext": "ready",
+                        "chunker_version": "test-v1",
+                        "source_lineage_hash": f"lineage-{paper_id}",
+                    }
+                    for paper_id in paper_ids if paper_id == "P001"
+                }
+
+            @staticmethod
+            def retrieve(_principal, _query, **_kwargs):
+                return []
+
+            @staticmethod
+            def primary_contribution_hits(_principal, *, paper_id, contribution, limit):
+                assert paper_id == "P001" and limit == 2
+                return [EvidenceHit(
+                    paper_id=paper_id, chunk_id="own-result-p2",
+                    content="In this work, the reaction afforded the target product in the reported scope.",
+                    page_start=2, page_end=2, section_path=("Results",),
+                    content_type="text", asset_refs=(), score=1.0,
+                    match_reason="primary_contribution_recovery", is_neighbor=False,
+                    index_id="index-001", source_lineage_hash=f"lineage-{paper_id}",
+                )]
+
+        service = self.app.state.planning_service
+        previous = service.library_index
+        service.library_index = BodyIndex()
+        try:
+            payload = service.matrix_enrichment_payload(self.first, self.project_id, force=True)
+        finally:
+            service.library_index = previous
+
+        paper = next(item for item in payload["papers"] if item["paper_id"] == "P001")
+        self.assertEqual(1, paper["retrieval_summary"]["contribution_seed_count"])
+        self.assertEqual("own-result-p2", paper["evidence_candidates"][0]["chunk_id"])
+        self.assertEqual(["primary_contribution_sample"], paper["evidence_candidates"][0]["retrieval_passes"])
+
+    def test_missing_abstract_adds_opening_windows_without_replacing_normal_evidence(self):
+        from copy import deepcopy
+        samples = []
+        class OpeningIndex:
+            enabled = True
+            def summaries(self, _principal, paper_ids):
+                return {pid: {'fulltext': 'ready', 'source_lineage_hash': 'v1'} for pid in paper_ids}
+            def retrieve(self, *args, **kwargs):
+                return []
+            def sample_document_context(self, _principal, paper_id, *, expected_lineage, limit=6, opening_only=False):
+                samples.append(opening_only)
+                return [{'paper_id': paper_id, 'chunk_id': 'front' if opening_only else 'body',
+                    'source_lineage_hash': expected_lineage, 'content_type': 'text', 'section_path': [],
+                    'content': 'This paper reports a bounded experiment and discusses its measured limitations.'}]
+        service = self.app.state.planning_service
+        matrix, _ = service._matrix(self.first, self.project_id)
+        matrix = deepcopy(matrix)
+        target = next(row for row in matrix['rows'] if row['paper_id'] == 'P001')
+        target['abstract'] = ''
+        with patch.object(service, 'library_index', OpeningIndex()):
+            payload = service.matrix_enrichment_payload(self.first, self.project_id,
+                matrix_snapshot=matrix, selected_paper_ids=['P001'], force=True)
+        paper = payload['papers'][0]
+        self.assertIn(True, samples)
+        opening = [c for c in paper['evidence_candidates'] if c.get('opening_candidate')]
+        self.assertEqual(['front'], [c['chunk_id'] for c in opening])
+        self.assertEqual('', paper['abstract'])
+        self.assertEqual('text', opening[0]['content_type'])
+
     def test_path_only_mineru_image_is_not_a_fact_candidate(self) -> None:
         self.assertFalse(
             _usable_fact_candidate("image", "images/8a42f1ac87f2.png")
@@ -1107,52 +1376,14 @@ class PlanningV1Tests(unittest.TestCase):
         )
         published = service.get(self.first, self.project_id)["literature_matrix"]
         paper = next(row for row in published["rows"] if row["paper_id"] == "P001")
+        # The paper list omits fact records; the detail row carries them.
+        detail = service.matrix_row(self.first, self.project_id, "P001")["paper"]
 
-        self.assertEqual("object_input", paper["scientific_facts"][0]["field_id"])
+        self.assertEqual("object_input", detail["scientific_facts"][0]["field_id"])
         self.assertEqual(
             ["object_input"],
             paper["fact_enrichment"]["supported_fact_roles"],
         )
-
-    @staticmethod
-    def isolated_reference_analysis(
-        _principal,
-        _project_id,
-        *,
-        candidate_id,
-        safe_name,
-        raw,
-        matrix,
-    ) -> dict:
-        del safe_name, raw
-        paper_ids = [row["paper_id"] for row in matrix["rows"]]
-        representatives = paper_ids[:6]
-        outline = (
-            "# Selected Outline\n\n"
-            "Scientific content source: current literature Matrix only.\n\n"
-            "## Introduction and scope\n"
-            f"Assigned papers: {', '.join(representatives)}.\n"
-            "Purpose: define the current review scope.\n\n"
-            "## 1. Copper allenation evidence\n"
-            f"Assigned papers: {', '.join(paper_ids)}.\n"
-            "Purpose: compare evidence from the current Matrix.\n\n"
-            "## Conclusion and outlook\n"
-            f"Assigned papers: {', '.join(representatives)}.\n"
-            "Purpose: synthesize limitations and future directions.\n"
-        )
-        return {
-            "candidate_id": candidate_id,
-            "analysis_mode": "ai_style_only_transfer_v2",
-            "content_source": "current_matrix_only",
-            "reference_content_reused": False,
-            "content_firewall": {
-                "transfer_received_reference_text": False,
-                "all_heading_levels_content_source": "current_matrix_only",
-            },
-            "reference_structure_metrics": {"heading_count": 3},
-            "writing_style": {"organization_pattern": "progressive comparison"},
-            "outline_md": outline,
-        }
 
     def test_matrix_contains_entire_confirmed_selection(self) -> None:
         with TestClient(self.app) as client:
@@ -2473,82 +2704,189 @@ class PlanningV1Tests(unittest.TestCase):
             self.assertEqual(200, saved.status_code, saved.text)
             self.assertTrue(saved.json()["outline_complete"])
 
-    def test_reference_outline_is_registered(self) -> None:
-        raw = "# Reference\n\n## 1. Mechanisms\nAssigned papers: P001.\nPurpose: compare.\n".encode()
-        with patch.object(
-            self.app.state.planning_service,
-            "_analyze_reference_document",
-            side_effect=self.isolated_reference_analysis,
-        ):
-            with TestClient(self.app) as client:
-                current = self.planning(client)
-                response = client.post(
-                    f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
-                    json={
-                        "revision": current["matrix_revision"],
-                        "filename": "reference.md",
-                        "content_base64": base64.b64encode(raw).decode(),
-                    },
-                    headers=self.headers(),
-                )
-                self.assertEqual(201, response.status_code, response.text)
-                payload = self.planning(client)
-                candidate_id = response.json()["candidate"]["candidate_id"]
-                selected_response = client.put(
-                    f"/api/v1/projects/{self.project_id}/planning/outline",
-                    json={
-                        "revision": payload["matrix_revision"],
-                        "outline_style": f"reference:{candidate_id}",
-                    },
-                    headers=self.headers(),
-                )
-                self.assertEqual(200, selected_response.status_code, selected_response.text)
-        candidate = response.json()["candidate"]
-        self.assertTrue(candidate["source_artifact_id"])
-        self.assertEqual("current_matrix_only", candidate["content_source"])
-        self.assertFalse(candidate["reference_content_reused"])
-        self.assertNotIn("Mechanisms", candidate["outline_md"])
-        self.assertIn(candidate["candidate_id"], {item["candidate_id"] for item in payload["reference_outline_candidates"]})
-        self.assertNotIn("Mechanisms", selected_response.json()["selected_outline_md"])
-
-    def test_legacy_reference_candidate_fails_content_isolation(self) -> None:
-        service = self.app.state.planning_service
-        self.assertFalse(
-            service._reference_candidate_is_isolated(
-                {
-                    "analysis_mode": "heading_extraction",
-                    "outline_md": "## Source heading",
-                }
+    def test_reference_markdown_imports_its_headings(self) -> None:
+        raw = (
+            "# A review of allene synthesis\n\n"
+            "## Abstract\n\n"
+            "## 1. Introduction\n\n"
+            "### 1.1 Scope\n\n"
+            "## 3. Mechanisms\n\n"
+            "## References\n"
+        ).encode()
+        with TestClient(self.app) as client:
+            current = self.planning(client)
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                json={
+                    "revision": current["matrix_revision"],
+                    "filename": "reference.md",
+                    "content_base64": base64.b64encode(raw).decode(),
+                },
+                headers=self.headers(),
             )
+            payload = self.planning(client)
+        self.assertEqual(201, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("markdown-headings", body["extraction_source"])
+        self.assertEqual("high", body["confidence"])
+        self.assertEqual(
+            ["A review of allene synthesis", "Abstract", "References"], body["skipped"]
         )
+        self.assertFalse(body["introduced_heading"])
+        self.assertEqual(
+            [
+                "## 1. Introduction",
+                "Section role: introduction",
+                "",
+                "### 1.1 Scope",
+                "",
+                "## 3. Mechanisms",
+            ],
+            body["outline_md"].splitlines(),
+        )
+        # Importing only fills the editor: no candidate appears and the Matrix is untouched.
+        self.assertEqual([], payload["outline_candidates"])
+        self.assertNotIn("reference_outline_candidates", payload)
+        self.assertEqual(current["matrix_revision"], body["matrix_revision"])
 
-    def test_reference_docx_content_is_not_used_as_candidate_headings(self) -> None:
+    def test_reference_docx_import_keeps_word_heading_levels(self) -> None:
         document = Document()
-        document.add_heading("1. Mechanistic organization", level=1)
-        document.add_paragraph("Reference discussion.")
+        document.add_heading("Allene review", level=0)
+        document.add_heading("1. Introduction", level=1)
+        document.add_heading("1.1 Scope", level=2)
+        document.add_paragraph("Reference prose that must not become a heading.")
+        document.add_heading("2. Mechanisms", level=1)
         stream = BytesIO()
         document.save(stream)
-        with patch.object(
-            self.app.state.planning_service,
-            "_analyze_reference_document",
-            side_effect=self.isolated_reference_analysis,
+        with TestClient(self.app) as client:
+            current = self.planning(client)
+            response = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                json={
+                    "revision": current["matrix_revision"],
+                    "filename": "reference.docx",
+                    "content_base64": base64.b64encode(stream.getvalue()).decode(),
+                },
+                headers=self.headers(),
+            )
+        self.assertEqual(201, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("docx-heading-styles", body["extraction_source"])
+        self.assertEqual("high", body["confidence"])
+        self.assertIn("Allene review", body["skipped"])
+        self.assertEqual(
+            [
+                "## 1. Introduction",
+                "Section role: introduction",
+                "",
+                "### 1.1 Scope",
+                "",
+                "## 2. Mechanisms",
+            ],
+            body["outline_md"].splitlines(),
+        )
+
+    def _post_reference(self, client, *, filename: str, raw: bytes):
+        current = self.planning(client)
+        return client.post(
+            f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+            json={
+                "revision": current["matrix_revision"],
+                "filename": filename,
+                "content_base64": base64.b64encode(raw).decode(),
+            },
+            headers=self.headers(),
+        )
+
+    def test_reference_pdf_imports_the_levels_mineru_reports(self) -> None:
+        from pathlib import Path as _Path
+        from unittest.mock import patch as _patch
+
+        service = self.app.state.planning_service
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(command, **_kwargs):
+            captured["command"] = [str(part) for part in command]
+            output_dir = _Path(command[command.index("--output-dir") + 1])
+            (output_dir / "markdown").mkdir(parents=True, exist_ok=True)
+            (output_dir / "markdown" / "reference.md").write_text(
+                "# A review\n\n## Abstract\n\n## 1. Introduction\n\n### 1.1 Scope\n",
+                encoding="utf-8",
+            )
+            _Path(command[command.index("--manifest-path") + 1]).write_text("{}", encoding="utf-8")
+
+        with _patch.object(service, "scientific_runner") as runner, _patch.object(
+            service.provider_settings, "mineru_environment", return_value={"MINERU_API_TOKEN": "token"}
+        ):
+            runner.run.side_effect = fake_run
+            with TestClient(self.app) as client:
+                response = self._post_reference(client, filename="reference.pdf", raw=b"%PDF-1.4 stub")
+        self.assertEqual(201, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("pdf-mineru-markdown", body["extraction_source"])
+        self.assertEqual("high", body["confidence"])
+        self.assertEqual(["A review", "Abstract"], body["skipped"])
+        self.assertIn("--pdf", captured["command"])
+        self.assertEqual(
+            ["## 1. Introduction", "Section role: introduction", "", "### 1.1 Scope"],
+            body["outline_md"].splitlines(),
+        )
+
+    def test_reference_pdf_reports_a_lower_confidence_when_mineru_is_unavailable(self) -> None:
+        from unittest.mock import patch as _patch
+
+        service = self.app.state.planning_service
+        with _patch.object(service, "scientific_runner") as runner, _patch.object(
+            service.provider_settings, "mineru_environment", return_value={}
+        ), _patch(
+            "review_writer_api.domain_services.planning.pdf_flat_text",
+            return_value="1. Introduction\n2.1 Mechanisms\n",
         ):
             with TestClient(self.app) as client:
-                current = self.planning(client)
-                response = client.post(
-                    f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
-                    json={
-                        "revision": current["matrix_revision"],
-                        "filename": "reference.docx",
-                        "content_base64": base64.b64encode(stream.getvalue()).decode(),
-                    },
-                    headers=self.headers(),
-                )
+                response = self._post_reference(client, filename="reference.pdf", raw=b"%PDF-1.4 stub")
         self.assertEqual(201, response.status_code, response.text)
-        candidate = response.json()["candidate"]
-        self.assertEqual("ai_style_only_transfer_v2", candidate["analysis_mode"])
-        self.assertNotIn("Mechanistic organization", candidate["outline_md"])
-        self.assertIn("Copper allenation evidence", candidate["outline_md"])
+        body = response.json()
+        # No MinerU credential: the upload still imports what the flat text
+        # allows and says the levels are not reliable, instead of failing.
+        self.assertEqual("pdf-flat-text-fallback", body["extraction_source"])
+        self.assertEqual("low", body["confidence"])
+        self.assertEqual(
+            ["## Introduction", "Section role: introduction", "", "### Mechanisms"],
+            body["outline_md"].splitlines(),
+        )
+        runner.run.assert_not_called()
+
+    def test_reference_import_rejects_a_stale_revision_and_unsupported_files(self) -> None:
+        with TestClient(self.app) as client:
+            current = self.planning(client)
+            body = {
+                "revision": current["matrix_revision"],
+                "filename": "reference.md",
+                "content_base64": base64.b64encode(
+                    "# Title\n\n## 1. Introduction\n".encode()
+                ).decode(),
+            }
+            stale = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                json={**body, "revision": current["matrix_revision"] + 5},
+                headers=self.headers(),
+            )
+            unsupported = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                json={**body, "filename": "reference.bin"},
+                headers=self.headers(),
+            )
+            no_headings = client.post(
+                f"/api/v1/projects/{self.project_id}/planning/reference-outlines",
+                json={
+                    **body,
+                    "content_base64": base64.b64encode(b"Just prose.\n").decode(),
+                },
+                headers=self.headers(),
+            )
+        self.assertEqual(409, stale.status_code, stale.text)
+        self.assertEqual(422, unsupported.status_code, unsupported.text)
+        self.assertEqual(422, no_headings.status_code, no_headings.text)
 
     def test_blueprint_uses_current_matrix_and_outline(self) -> None:
         seed_verified_matrix(self.app.state.planning_service, self.first, self.project_id)

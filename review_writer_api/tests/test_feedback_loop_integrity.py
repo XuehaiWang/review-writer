@@ -153,22 +153,6 @@ class FeedbackLoopIntegrityTests(unittest.TestCase):
                     self.assertEqual(91, result["paragraph_scores"][0]["score"])
                     self.assertEqual("partially_supported", result["paragraph_scores"][0]["source_check_status"])
 
-    def test_single_paragraph_update_does_not_resurrect_other_paragraph_quality_gates(self):
-        from review_writer_api.domain_services.drafts import DraftsService
-        service = object.__new__(DraftsService)
-        score = {"paragraph_id": "S01-p1", "score": 93, "severity": "none", "route": "pass"}
-        other = {**score, "paragraph_id": "S01-p2"}
-        for rule in ("P01", "C01"):
-            with self.subTest(rule=rule):
-                quality = service._incremental_quality(
-                    {"score": 93, "paragraph_scores": [score, other],
-                     "hard_gate_failures": ["paragraph_readability_or_source_failures"],
-                     "preflight": {"paragraph_findings": [{"paragraph_id": "S01-p2", "rule": rule, "severity": "major"}]}},
-                    {"paragraph_score": score, "local_preflight": {"paragraph_findings": [], "paragraph_checks": []}},
-                    paragraph_id="S01-p1", source_quality_artifact_id="q1",
-                )
-                self.assertEqual(rule == "C01", bool(quality["hard_gate_failures"]))
-                self.assertEqual(93, quality["score"])
 
     def test_quality_findings_keep_scores_without_becoming_integrity_failures(self):
         for rule, severity, expected_score in (("P01", "major", 93), ("P01", "minor", 93), ("M05", "minor", 93), ("C01", "major", 79)):

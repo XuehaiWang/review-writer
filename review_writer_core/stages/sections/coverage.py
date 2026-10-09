@@ -1,7 +1,6 @@
 """Shared primary-paper coverage contract for generation, resume and publication."""
 from __future__ import annotations
 
-from review_writer_core.stages.sections.execution import chapter_responsibilities
 from review_writer_core.stages.sections.authoring import paragraph_is_current
 from review_writer_core.evidence_integrity import normalize_retrieval_mode
 from review_writer_core.claim_contracts import (
@@ -11,21 +10,69 @@ from review_writer_core.claim_contracts import (
 from review_writer_core.scientific_facts import fact_usage, registered_fact_bindings
 from review_writer_core.stages.sections.source_writing import CONTRACT as SOURCE_CONTRACT, valid_source_claim, fingerprint
 from review_writer_core.stages.sections.evidence_resolution import has_evidence_resolution, valid_pending_output
+from review_writer_core.stages.sections.source_units import QUOTE_FORMAT, UNIT_FORMAT
+
+
+def checkpoint_authoring_settings(checkpoint, *, project_id, rules, synthesis_rules):
+    """Pin prompt resources in the existing checkpoint, without relaxing input checks."""
+    owned = checkpoint if checkpoint.get("project_id") == project_id else {}
+    saved = owned.get("authoring_settings")
+    if saved is not None:
+        if (not isinstance(saved, dict) or saved.get("version") != 1
+                or saved.get("citation_format") not in {QUOTE_FORMAT, UNIT_FORMAT}
+                or any(not isinstance(saved.get(key), str) for key in ("rules", "synthesis_rules"))):
+            raise ValueError("Unsupported authoring snapshot; existing checkpoints were preserved.")
+        return dict(saved)
+    # Old in-flight responses retain their quote contract; no inference from model output.
+    legacy = bool(owned.get("entries") or owned.get("authoring_states"))
+    return {"version": 1, "rules": rules, "synthesis_rules": synthesis_rules,
+            "citation_format": QUOTE_FORMAT if legacy else UNIT_FORMAT}
+
+
+def check_historical_resume(checkpoint, signatures, *, project_id, rejected_entries):
+    """Guard ambiguous legacy work, but allow a precise chapter-local invalidation."""
+    if checkpoint.get("project_id") != project_id or checkpoint.get("authoring_settings"):
+        return
+    saved_entries = checkpoint.get("entries") or {}
+    # A saved section fingerprint proves which chapter's inputs changed. That
+    # chapter must be regenerated, while matching entries remain reusable; an
+    # ID-only/legacy entry is still ambiguous and must not be silently dropped.
+    affected = {
+        sid for sid in rejected_entries
+        if not (isinstance(saved_entries.get(sid), dict)
+                and saved_entries[sid].get("input_fingerprint"))
+    }
+    for sid, entry in (checkpoint.get("authoring_states") or {}).items():
+        if sid in signatures and isinstance(entry, dict) and entry.get("section_input") != signatures[sid]:
+            affected.add(sid)
+    if affected:
+        raise ValueError("Historical section inputs cannot be verified under current rules; existing content and "
+                         "checkpoints were preserved. Review compatibility before starting new requests for unfinished "
+                         "sections: " + ", ".join(sorted(affected)))
 
 
 def section_input_fingerprints(tasks, evidence_sections, matrix, blueprint, shared):
-    """Section-local authoring inputs and shared chapter responsibilities.
+    """Fingerprint the chapter's own inputs plus genuinely global writing rules.
 
-    Citation numbering is global: changing paper order invalidates every section.
-    Shared scope, rules and outline remain global by design, not best-effort guesses.
+    An unrelated outline assignment or newly added paper must not invalidate all
+    completed chapters. Current chapter content and explicit dependencies are
+    checked locally; shared scope, model and authoring rules remain global.
     """
     rows = matrix.get("rows", []) if isinstance(matrix, dict) else matrix
     by_paper = {str(row.get("paper_id")): row for row in rows or [] if isinstance(row, dict)}
     specs = {str(s.get("section_id")): s for s in blueprint.get("sections") or []}
-    common = fingerprint({"contract": "section-input/1", "shared": shared,
-        "blueprint": {k: v for k, v in blueprint.items() if k != "sections"},
-        "responsibilities": chapter_responsibilities(tasks),
-        "paper_order": list(by_paper)})
+    # Full-outline and sibling-chapter snapshots are navigation hints supplied
+    # to a fresh write, not prerequisites for reusing a completed independent
+    # chapter. Its local heading, parent scope, assignments and argument are
+    # already part of task/spec below. Explicit dependencies are fingerprinted
+    # separately and still invalidate their dependants.
+    global_blueprint = {key: blueprint.get(key) for key in (
+        "review_topic", "scope_contract", "writing_scope_contract", "writing_style",
+        "reading_strategy", "classification_basis", "taxonomy_profile", "evidence_mode",
+    ) if key in blueprint}
+    shared_rules = {key: value for key, value in shared.items() if key != "outline"}
+    common = fingerprint({"contract": "section-input/2", "shared": shared_rules,
+        "blueprint": global_blueprint})
     signatures = {}
     for task in tasks:
         sid = str(task.get("section_id"))
@@ -164,6 +211,11 @@ def reusable_section_entries(entries, tasks, evidence_sections):
             rejected[section_id] = "Incomplete section checkpoint."
             continue
         output = entry["output"]
+        saved_heading = " ".join(str(output.get("heading") or "").casefold().split())
+        current_heading = " ".join(str(task.get("heading") or "").casefold().split())
+        if saved_heading and current_heading and saved_heading != current_heading:
+            rejected[section_id] = "Section topic changed; old prose cannot be reused."
+            continue
         from review_writer_core.stages.sections.source_writing import BINDING_CONTRACT
         source_review = entry["synthesis"].get("source_review") or {}
         if source_review.get("unresolved"):

@@ -6,22 +6,26 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Query, status
+from fastapi import APIRouter, Depends, Header, status
 
 from review_writer_api.domain_services.discovery import DiscoveryService
 from review_writer_api.domain_services.planning import PlanningService
-from review_writer_api.errors import WorkflowConflict
+from review_writer_api.errors import WorkflowConflict, WorkflowValidationError
 from review_writer_api.job_service import JobService
 from review_writer_api.planning_jobs import queue_matrix_enrichment
 from review_writer_api.routers.jobs import _job_response
-from review_writer_api.security import Principal
+from review_writer_api.security import Permission, Principal
 from review_writer_api.workflow_schemas import (
     DiscoveryConfirmRequest,
+    DiscoveryDownloadRequest,
+    DiscoveryFulltextCheckRequest,
     DiscoveryReviewSaveRequest,
     DiscoverySearchRequest,
-    DiscoverySelectionRequest,
-    DiscoveryTopSelectionRequest,
 )
+
+
+# One request covers a page of candidates; the probe pool bounds concurrency.
+MAX_FULLTEXT_CHECK_CANDIDATES = 50
 
 
 def build_discovery_router(
@@ -108,13 +112,83 @@ def build_discovery_router(
     ) -> dict[str, Any]:
         return discovery_service.get(principal, project_id)
 
-    @router.get("/fulltext-check")
+    @router.post("/fulltext-check")
     def check_fulltext(
         project_id: str,
-        candidate_id: str = Query(min_length=1, max_length=2048),
+        payload: DiscoveryFulltextCheckRequest,
         principal: Principal = Depends(principal_dependency),
     ) -> dict[str, Any]:
-        return discovery_service.check_fulltext(principal, project_id, candidate_id)
+        """Probe open-PDF availability for the listed candidates.
+
+        This is a POST because it may perform bounded outbound network work; a
+        GET must stay a pure read. One request covers a page of candidates.
+        """
+        candidate_ids = [
+            item.strip() for item in payload.candidate_ids
+            if item.strip()
+        ][:MAX_FULLTEXT_CHECK_CANDIDATES]
+        if not candidate_ids:
+            raise WorkflowValidationError("At least one candidate is required.")
+        return {"checks": discovery_service.check_fulltext_many(principal, project_id, candidate_ids)}
+
+    @router.post("/download-jobs", status_code=status.HTTP_202_ACCEPTED)
+    def download_discovery_candidate(
+        project_id: str,
+        payload: DiscoveryDownloadRequest,
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        principal: Principal = Depends(principal_dependency),
+    ):
+        principal.require(Permission.PROJECT_WRITE)
+        candidate = discovery_service.download_candidate(
+            principal, project_id, payload.candidate_id, payload.revision
+        )
+        operation_key = f"project:{project_id}"
+
+        def current_download():
+            current = job_service.repository.get_current_job(
+                principal.user_id,
+                scope="library",
+                job_type="discovery.acquire",
+                operation_key=operation_key,
+            )
+            if current is None or current.status not in {"queued", "running", "cancel_requested"}:
+                return None
+            candidates = current.payload.get("candidates") or []
+            if current.payload.get("discovery_revision") == payload.revision and any(
+                isinstance(item, dict) and str(item.get("candidate_id") or "") == payload.candidate_id
+                for item in candidates
+            ):
+                return current
+            raise WorkflowConflict("Another paper is being downloaded. Wait for it to finish, then retry.")
+
+        current = current_download()
+        if current is not None:
+            return _job_response(current)
+        try:
+            job = job_service.submit(
+                principal,
+                scope="library",
+                project_id=None,
+                # Discovery owns the whole acquisition chain: download the open
+                # PDF, then refresh this candidate. Library is never told about
+                # Discovery, and no back-channel payload field is needed.
+                job_type="discovery.acquire",
+                idempotency_key=idempotency_key.strip() or str(uuid.uuid4()),
+                payload={
+                    "candidates": [candidate],
+                    "discovery_revision": payload.revision,
+                    "project_id": project_id,
+                },
+                operation_key=operation_key,
+            )
+        except WorkflowConflict as exc:
+            if not exc.details.get("current_job_id"):
+                raise
+            current = current_download()
+            if current is None:
+                raise
+            return _job_response(current)
+        return _job_response(job)
 
     @router.put("")
     def save_discovery(
@@ -130,31 +204,8 @@ def build_discovery_router(
             coverage_decision=payload.coverage_decision,
         )
 
-    @router.put("/selection/{paper_id}")
-    def select_paper(
-        project_id: str,
-        paper_id: str,
-        payload: DiscoverySelectionRequest,
-        principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        return discovery_service.select_one(
-            principal, project_id, paper_id, payload.selected
-        )
-
-    @router.post("/selection/top")
-    def select_top(
-        project_id: str,
-        payload: DiscoveryTopSelectionRequest,
-        principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        return discovery_service.select_top(principal, project_id, payload.count)
-
-    @router.delete("/selection")
-    def clear_selection(
-        project_id: str,
-        principal: Principal = Depends(principal_dependency),
-    ) -> dict[str, Any]:
-        return discovery_service.clear(principal, project_id)
+    # Selection is edited in the browser and saved once with the review, so no
+    # per-candidate selection endpoints exist.
 
     @router.post("/confirm")
     def confirm(

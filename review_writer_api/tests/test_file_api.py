@@ -8,35 +8,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from review_writer_api.app import create_app
 from review_writer_api.config import ApiSettings
 from review_writer_api.database import Base, Project, User
 from review_writer_api.security import Principal, Role
+from review_writer_api.tests._test_support import session_factory
 from review_writer_api.workflow_models import WorkflowJob
 
 
 TEST_KEY = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 
-
-def session_factory():
-    engine = create_engine(
-        "sqlite+pysqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    @event.listens_for(engine, "connect")
-    def enable_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, expire_on_commit=False), engine
 
 
 class ArtifactFileApiTests(unittest.TestCase):
@@ -51,6 +33,8 @@ class ArtifactFileApiTests(unittest.TestCase):
             public_origin="http://testserver",
             credential_encryption_key=TEST_KEY,
             hosted_workspace_root=root / "users",
+            # Jobs are only queued/cancelled here; no provider request is executed.
+            text_provider_api_key="test-placeholder-not-a-real-key",
         )
         with self.sessions.begin() as session:
             first = User(email="first@example.com", display_name="First", password_hash="hash")

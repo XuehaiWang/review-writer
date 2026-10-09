@@ -190,17 +190,6 @@ def infer_logic(title: str) -> str:
     return "thematic_synthesis"
 
 
-def target_depth(title: str, selected_count: int) -> tuple[int, str]:
-    low = title.lower()
-    if any(word in low for word in ["introduction", "background"]):
-        return 3, "500-800"
-    if any(word in low for word in ["conclusion", "outlook", "future"]):
-        return 3, "500-900"
-    if selected_count >= 6:
-        return 5, "1000-1500"
-    return 4, "800-1200"
-
-
 def infer_claim_type(title: str, index: int) -> str:
     low = title.lower()
     if index == 0 and any(w in low for w in ["foundational", "classical", "introduction"]):
@@ -389,7 +378,7 @@ def build_section(
         claim_papers = evidence_papers[idx * 2 : idx * 2 + 4] or evidence_papers[:4]
         claims.append(claim_from_papers(section["section_id"], title, idx, claim_papers, axes))
     dominant_logic = infer_logic(title)
-    target_paragraphs, target_words = target_depth(title, len(selected))
+    target_paragraphs, target_words = 0, ""  # Legacy fields, never automatic quotas.
     legacy_thesis = section_thesis(title, evidence_papers, dominant_logic)
     axis_contract = canonical_classification_contract(
         [

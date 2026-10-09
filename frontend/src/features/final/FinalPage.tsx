@@ -90,8 +90,6 @@ export function FinalPage() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedJob, setSelectedJob] = useState({ projectId: "", jobId: "" });
   const [startingAction, setStartingAction] = useState<FinalAction>("build");
-  const [articleAuthors, setArticleAuthors] = useState("");
-  const [articleAffiliations, setArticleAffiliations] = useState("");
   const [pdfLanguage, setPdfLanguage] = useState<"en" | "zh-CN">("en");
   const downloadedJob = useRef("");
   const pendingDownloadJob = useRef("");
@@ -119,11 +117,6 @@ export function FinalPage() {
     writeFinalJobId(project.project_id, jobId);
     setSelectedJob({ projectId: project.project_id, jobId });
   };
-
-  useEffect(() => {
-    setArticleAuthors((payload?.front_matter?.authors || []).join("\n"));
-    setArticleAffiliations((payload?.front_matter?.affiliations || []).join("\n"));
-  }, [payload?.front_matter]);
 
   useEffect(() => {
     if (!project?.project_id) return;
@@ -177,17 +170,6 @@ export function FinalPage() {
     setStartingAction(action);
     runJob.mutate({ action });
   };
-  const saveFrontMatter = useMutation({
-    mutationFn: () => apiRequest(
-      `/api/v1/projects/${encodeURIComponent(project!.project_id)}/final/front-matter`,
-      { method: "PUT", ...jsonBody({
-        revision: payload!.revision,
-        authors: articleAuthors.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-        affiliations: articleAffiliations.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-      }) },
-    ),
-    onSuccess: refresh,
-  });
   const resume = useMutation({
     mutationFn: () => apiRequest<Job>(`/api/v1/jobs/${encodeURIComponent(currentJobId || "")}/retry`, {
       method: "POST", headers: { "Idempotency-Key": newIdempotencyKey() },
@@ -214,11 +196,9 @@ export function FinalPage() {
   const canExport = Boolean(payload?.final_current && payload?.release_current && !active);
   const wordReady = Boolean(payload?.final_draft_docx_exists && !payload.final_draft_docx_stale);
   const pdfReady = Boolean(payload?.final_pdf_exists && !payload.final_pdf_stale && payload.pdf_language_profile === pdfLanguage);
-  const publicationChanged = articleAuthors !== (payload?.front_matter?.authors || []).join("\n")
-    || articleAffiliations !== (payload?.front_matter?.affiliations || []).join("\n");
-  const error = saveFrontMatter.error || cancel.error || resume.error;
+  const error = cancel.error || resume.error;
   const tabs: Array<[FinalTab, string]> = [
-    ["preparation", text("出版信息", "Publication information")],
+    ["preparation", text("准备与范围", "Preparation and scope")],
     ["final", text("最终稿", "Final draft")],
     ["audit", text("检查详情", "Checks")],
     ["pdf", text("PDF 与 QA", "PDF and QA")],
@@ -232,16 +212,13 @@ export function FinalPage() {
     {final.isPending ? <div className="empty-state">{text("正在加载终稿产物…", "Loading final artifacts…")}</div> : null}
     {final.error ? <ErrorState error={final.error} onRetry={() => final.refetch()} /> : null}
     {payload ? <><div className="final-grid-react">
-      <aside className="pane final-list-react"><div className="pane-head"><div><span className="step-label">{text("终稿产物", "Final outputs")}</span><h2>{project?.slug || project?.project_id}</h2></div></div><div className="draft-flow-list">{mainTabs.map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => { setTab(value); setShowAdvanced(false); }}><strong>{label}</strong></button>)}<details className="workflow-advanced-nav" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}><summary>{text("出版信息与检查详情", "Publication information and checks")}</summary><div>{advancedTabs.map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => { setTab(value); setShowAdvanced(true); }}><strong>{label}</strong></button>)}</div></details></div></aside>
+      <aside className="pane final-list-react"><div className="pane-head"><div><span className="step-label">{text("终稿产物", "Final outputs")}</span><h2>{project?.slug || project?.project_id}</h2></div></div><div className="draft-flow-list">{mainTabs.map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => { setTab(value); setShowAdvanced(false); }}><strong>{label}</strong></button>)}<details className="workflow-advanced-nav" open={showAdvanced} onToggle={(event) => setShowAdvanced(event.currentTarget.open)}><summary>{text("准备与检查详情", "Preparation and checks")}</summary><div>{advancedTabs.map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} type="button" onClick={() => { setTab(value); setShowAdvanced(true); }}><strong>{label}</strong></button>)}</div></details></div></aside>
       <section className="pane final-main-react"><div className="pane-head"><div><span className="step-label">{payload.freshness.stale ? text("已过期", "Out of date") : text("当前", "Current")}</span><h2>{tabs.find(([value]) => value === tab)?.[1]}</h2></div></div><div className="final-document-react">
         {payload.final_current && payload.release_current ? <div className={payload.pending_issue_count ? "message message-warning" : "message message-success"}>{payload.pending_issue_count ? <>{text(`终稿已生成，可下载 · ${payload.pending_issue_count} 项内容建议核对。`, `Final available for download · ${payload.pending_issue_count} finding(s) to review.`)} <button className="button button-quiet" type="button" onClick={() => { setTab("audit"); setShowAdvanced(true); }}>{text("查看处理建议", "View suggested actions")}</button></> : text("终稿已生成。", "Final draft generated.")}</div> : null}
         {tab === "preparation" ? <>
           <div className="final-preparation-cards"><article className={payload.draft_approval_current ? "good" : "bad"}><h3>{payload.draft_approval_current ? text("初稿已确认", "Draft approved") : text("需要先确认初稿", "Draft approval required")}</h3>{approval.score !== undefined ? <p>{text("分数", "Score")}: {String(approval.score)} / {String(approval.goal || "")}</p> : null}</article><article><strong>{text("最终稿", "Final draft")}</strong><StatusPill exists={Boolean(payload.final_artifact_id)} current={payload.final_current} optional={false} /></article></div>
-          <section className="front-matter-editor"><h3>{text("作者与单位", "Authors and affiliations")}</h3><p>{text("文章文字请在初稿修改；终稿只装配已确认内容，不自动生成摘要或结论。", "Edit prose in Draft. Final assembles approved content without generating summaries.")}</p>
-            <label>{text("作者（每行一位）", "Authors (one per line)")}<textarea rows={4} value={articleAuthors} onChange={e => setArticleAuthors(e.target.value)} /></label>
-            <label>{text("单位（每行一个）", "Affiliations (one per line)")}<textarea rows={4} value={articleAffiliations} onChange={e => setArticleAffiliations(e.target.value)} /></label>
-            <button className="button button-primary" disabled={!payload.draft_approval_current || active || !publicationChanged || saveFrontMatter.isPending} onClick={() => saveFrontMatter.mutate()}>{text("保存出版信息", "Save publication information")}</button>
-          </section>
+          <section className="front-matter-editor"><h3>{text("作者与单位", "Authors and affiliations")}</h3><p>{text("作者与单位请在初稿的“出版信息”窗口中编辑；终稿只装配已确认内容，不自动生成摘要或结论。", "Edit authors and affiliations in the Draft publication window. Final assembles approved content without generating summaries.")}</p>
+            <dl><div><dt>{text("作者", "Authors")}</dt><dd>{(payload.front_matter.authors || []).join("；") || text("未填写", "Not set")}</dd></div><div><dt>{text("单位", "Affiliations")}</dt><dd>{(payload.front_matter.affiliations || []).join("；") || text("未填写", "Not set")}</dd></div></dl></section>
           <section className="evidence-boundary-card"><header><span className="step-label">{text("范围与证据边界", "Scope and evidence boundary")}</span><h3>{text("基于当前确认语料的叙述性专题综述", "Narrative review of the confirmed corpus")}</h3></header><p>{text("本稿只声明覆盖用户确认的论文集合，不声称穷尽全领域文献。", payload.evidence_boundary.statement || "This review is limited to the user-confirmed corpus and does not claim exhaustive global coverage.")}</p><dl><div><dt>{text("确认论文", "Selected papers")}</dt><dd>{payload.evidence_boundary.selected_paper_count || 0}</dd></div><div><dt>{text("可写主论文", "Writeable primary papers")}</dt><dd>{payload.evidence_boundary.writeable_primary_paper_count || 0}</dd></div><div><dt>{text("未解决主论文", "Unresolved primary papers")}</dt><dd>{payload.evidence_boundary.unresolved_primary_paper_ids?.length || 0}</dd></div><div><dt>{text("问题级缺口", "Question-level gaps")}</dt><dd>{payload.evidence_boundary.corpus_gap_questions?.length || 0}</dd></div></dl>{payload.evidence_boundary.warnings?.length ? <details><summary>{text(`查看 ${payload.evidence_boundary.warnings.length} 项边界警告`, `View ${payload.evidence_boundary.warnings.length} boundary warnings`)}</summary><ul>{payload.evidence_boundary.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></details> : <p className="message message-success">{text("当前未记录额外证据边界警告。", "No additional evidence-boundary warnings are recorded.")}</p>}</section>
         </> : null}
         {tab === "final" ? <FinalManuscriptPreview key={project!.project_id} projectId={project!.project_id} markdown={payload.final_draft_md} versions={payload.versions || []} /> : null}

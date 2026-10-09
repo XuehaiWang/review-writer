@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 import review_writer_api.workflow_models  # noqa: F401 - registers target metadata
-from review_writer_api.database import Project, User
+from review_writer_api.database import Project, User, utc_now
 from review_writer_api.workflow_models import LibraryArtifact, LibraryPaper, WorkflowJob
 
 
@@ -84,7 +84,8 @@ class WorkflowMigrationTests(unittest.TestCase):
     def test_workflow_schema_has_separate_workflow_and_job_scope_revisions(self) -> None:
         script = ScriptDirectory.from_config(self.alembic_config())
 
-        self.assertEqual(["20260924_0028"], script.get_heads())
+        self.assertEqual(["20260925_0029"], script.get_heads())
+        self.assertEqual("20260924_0028", script.get_revision("20260925_0029").down_revision)
         self.assertEqual("20260923_0027", script.get_revision("20260924_0028").down_revision)
         delegation_revision = script.get_revision("20260923_0027")
         self.assertEqual("20260923_0026", delegation_revision.down_revision)
@@ -381,13 +382,27 @@ class WorkflowMigrationTests(unittest.TestCase):
                     )
                     session.add(user)
                     session.flush()
-                    first = Project(user_id=user.id, slug="first", topic="First")
-                    second = Project(user_id=user.id, slug="second", topic="Second")
-                    session.add_all([first, second])
-                    session.flush()
-                    for project in (first, second):
-                        insert_legacy_job(session, user_id=user.id, project_id=project.id,
-                            scope="project", scope_key=str(project.id),
+                    # This revision predates 20260925_0029, so the historical NOT NULL
+                    # current_stage column must be supplied explicitly: the ORM no longer
+                    # maps a column that the current head drops.
+                    now = utc_now()
+                    project_ids = []
+                    for slug in ("first", "second"):
+                        project_id = uuid.uuid4()
+                        session.execute(
+                            text(
+                                "INSERT INTO projects (id, user_id, slug, topic, taxonomy_profile, "
+                                "model_tier, status, current_stage, stage_states, created_at, updated_at) "
+                                "VALUES (:id, :user_id, :slug, :topic, 'general_academic', 'terra', "
+                                "'active', 'discovery', '{}', :now, :now)"
+                            ),
+                            {"id": project_id.hex, "user_id": user.id.hex, "slug": slug,
+                             "topic": slug.title(), "now": now},
+                        )
+                        project_ids.append(project_id)
+                    for project_id in project_ids:
+                        insert_legacy_job(session, user_id=user.id, project_id=project_id,
+                            scope="project", scope_key=str(project_id),
                             request_key="same-request", job_type="discovery",
                             queue_name="scientific")
 

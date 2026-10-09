@@ -79,6 +79,33 @@ class OwnedProjectService:
             raise WorkflowNotFound("Project not found.")
         return project
 
+    def _read_json_optional(
+        self,
+        principal: Principal,
+        project_id: str,
+        logical_name: str,
+        *,
+        required: bool = True,
+        artifact_label: str = "workflow",
+    ) -> tuple[dict[str, Any] | None, ArtifactRecord | None]:
+        self._owned_project(principal, project_id)
+        artifact = self.repository.get_current_artifact(
+            principal.user_id, project_id, logical_name
+        )
+        if artifact is None:
+            if required:
+                raise self._stage_not_ready(principal, project_id, logical_name)
+            return None, None
+        resolved = self.artifacts.resolve_owned_artifact(principal.user_id, artifact.id)
+        try:
+            payload = json.loads(resolved.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkflowConflict(
+                f"The current {artifact_label} artifact is unreadable."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise WorkflowConflict(f"The current {artifact_label} artifact is invalid.")
+        return payload, artifact
 
     def _stage_not_ready(self, principal, project_id, logical_name):
         # Only called when there is no registered current artifact. Registered

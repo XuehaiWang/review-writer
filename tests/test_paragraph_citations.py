@@ -19,10 +19,16 @@ def test_direct_report_labels_do_not_split_the_same_source_scope():
     assert render_paragraph_citations(rows) == "A finding. Yield was reported. [1]"
 
 
-def test_ambiguity_and_paragraph_boundaries_preserve_citations():
-    for second in [('An interpretation.', 'author_inference'), ('The authors said “A”.', 'reported_finding'), ('B.', '')]:
-        assert render_paragraph_citations([('A.', '[1]', 'reported_finding'),
-                                          (second[0], '[1]', second[1])]).count('[1]') == 2
+def test_same_source_groups_regardless_of_assertion_kind():
+    assert render_paragraph_citations([('A.', '[1]', 'reported_finding'),
+                                      ('An interpretation.', '[1]', 'author_inference')]) == 'A. An interpretation. [1]'
+    assert render_paragraph_citations([('A.', '[1]', 'reported_finding'),
+                                      ('B.', '[1]', '')]) == 'A. B. [1]'
+
+
+def test_explicit_quotations_keep_local_attribution():
+    assert render_paragraph_citations([('A.', '[1]', 'reported_finding'),
+                                      ('The authors said “A”.', '[1]', 'reported_finding')]).count('[1]') == 2
     assert render_paragraph_citations([('A.', '[1]', 'reported_finding')]) == 'A. [1]'
     assert render_paragraph_citations([('B.', '[1]', 'reported_finding')]) == 'B. [1]'
     assert render_paragraph_citations([]) == ''
@@ -30,7 +36,23 @@ def test_ambiguity_and_paragraph_boundaries_preserve_citations():
 
 def test_long_runs_keep_nearby_markers():
     sentence = 'word ' * 70 + 'end.'
-    assert render_paragraph_citations([(sentence, '[1]', 'reported_finding')] * 2).count('[1]') == 2
+    # 2 x 71 words is still one marker: it stays inside the grouping window...
+    assert render_paragraph_citations([(sentence, '[1]', 'reported_finding')] * 2).count('[1]') == 1
+    # ...but a run past the window re-cites so the marker stays near its prose.
+    long_sentence = 'word ' * 110 + 'end.'
+    assert render_paragraph_citations([(long_sentence, '[1]', 'reported_finding')] * 2).count('[1]') == 2
+
+
+def test_the_grouping_window_is_the_documented_value():
+    from review_writer_core.paragraph_citations import MAX_GROUPED_WORDS
+
+    # Raising the window merges more same-source sentences and removes markers;
+    # it is a deliberate, measured trade-off rather than a magic literal.
+    assert MAX_GROUPED_WORDS == 180
+    sentence = 'word ' * 89 + 'end.'  # 90 words
+    assert render_paragraph_citations([(sentence, '[1]', 'reported_finding')] * 2).count('[1]') == 1
+    ninety_five = 'word ' * 94 + 'end.'  # 95 words: 95 + 95 > 180
+    assert render_paragraph_citations([(ninety_five, '[1]', 'reported_finding')] * 2).count('[1]') == 2
 
 
 def test_repetition_hints_span_paragraphs_without_merging_different_results():

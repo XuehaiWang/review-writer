@@ -267,17 +267,15 @@ class TwoDimensionalChemistryTests(unittest.TestCase):
         path = Path("motif.png")
         with patch.object(overview, "resolve_skeleton_smiles", return_value="CCO"), patch.object(
             overview, "_render_motif_2d", return_value=path
-        ) as render, patch.object(overview, "render_smiles_ball_and_stick") as legacy:
+        ) as render:
             self.assertEqual(path, overview.render_skeleton_model({}, path, style="ai3d"))
             render.assert_called_once()
-            legacy.assert_not_called()
+            self.assertFalse(hasattr(overview, "render_smiles_ball_and_stick"))
 
     def test_missing_2d_renderer_does_not_substitute_ball_and_stick(self):
-        with patch.object(overview, "_render_motif_2d", return_value=None), patch.object(
-            overview, "render_smiles_ball_and_stick"
-        ) as legacy:
+        with patch.object(overview, "_render_motif_2d", return_value=None):
             self.assertIsNone(overview._render_scheme_molecule("CCO", Path("a.png"), (200, 200), "3d"))
-            legacy.assert_not_called()
+            self.assertFalse(hasattr(overview, "render_smiles_ball_and_stick"))
 
     def test_chemistry_prompt_reserves_reaction_band(self):
         features = {"has_reaction_focus": True, "product_keywords": ["ethanol"],
